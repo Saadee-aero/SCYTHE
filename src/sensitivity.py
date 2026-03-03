@@ -7,29 +7,19 @@ AX-SENSITIVITY-STATE-PURITY-13: Smoothing state owned by controller, not module.
 
 from __future__ import annotations
 
+import numpy as np
 from typing import Any
 
 
-def _run_perturbed(
-    config: dict,
-    perturb: dict,
-    mode: str,
-    mc_call_counter: list | None = None,
-) -> float:
-    """Run evaluation with perturbed config, return P_hit. Disables nested sensitivity. AX-MC-CALL-TRACE-25."""
-    from adapter import run_simulation_snapshot
-
-    cfg = dict(config)
-    cfg.update(perturb)
-    cfg.pop("simulation_fidelity", None)  # Avoid nested sensitivity runs
-    snap = run_simulation_snapshot(
-        config_override=cfg,
-        include_advisory=False,
-        caller="SENSITIVITY",
-        trace_mode=mode,
-        mc_call_counter=mc_call_counter,
-    )
-    return float(snap.get("P_hit", 0.0) or 0.0)
+def _compute_p_hit_shift(snapshot: dict, dx: float, dy: float) -> float:
+    """P_hit for target shifted by (dx, dy). Pure NumPy, no propagation."""
+    tp = np.asarray(snapshot["target_position"], dtype=float).flatten()[:2]
+    shifted_target = tp + np.array([dx, dy], dtype=float)
+    impact_pts = np.asarray(snapshot["impact_points"], dtype=float)
+    if impact_pts.size == 0 or impact_pts.ndim != 2 or impact_pts.shape[1] < 2:
+        return 0.0
+    distances = np.linalg.norm(impact_pts[:, :2] - shifted_target, axis=1)
+    return float(np.mean(distances <= snapshot["target_radius"]))
 
 
 def _wind_sensitivity_level(dP_dW: float) -> str:
@@ -63,17 +53,10 @@ def compute_sensitivity(
         For advanced: None.
     """
     P_base = float(snapshot.get("P_hit", 0.0) or 0.0)
-    cfg = dict(config)
-    n_orig = int(cfg.get("n_samples", 1000))
 
     if mode == "standard":
-        # Perturb wind magnitude by +0.5 m/s (along wind_x for simplicity)
-        wx = float(cfg.get("wind_x", cfg.get("wind_mean_x", 0.0)))
-        perturb = {
-            "wind_x": wx + 0.5,
-            "n_samples": max(30, int(n_orig * 0.3)),
-        }
-        P_perturbed = _run_perturbed(cfg, perturb, mode, mc_call_counter)
+        # Wind +0.5 m/s ~ impacts shift ~2 m downwind; equivalent target shift (-2, 0)
+        P_perturbed = _compute_p_hit_shift(snapshot, -2.0, 0.0)
         dP_dW = (P_perturbed - P_base) / 0.5 if 0.5 != 0 else 0.0
 
         # AX-LIVE-GRADIENT-SMOOTH-11: exponential smoothing
@@ -92,14 +75,10 @@ def compute_sensitivity(
         return g_smoothed
 
     if mode == "advanced":
-        # Perturb wind +0.5, altitude +5 m, velocity +2 m/s; full n_samples
-        wx = float(cfg.get("wind_x", cfg.get("wind_mean_x", 0.0)))
-        alt = float(cfg.get("uav_altitude", 100.0))
-        vx = float(cfg.get("uav_vx", 20.0))
-
-        P_w = _run_perturbed(cfg, {"wind_x": wx + 0.5}, mode, mc_call_counter)
-        P_h = _run_perturbed(cfg, {"uav_altitude": alt + 5.0}, mode, mc_call_counter)
-        P_v = _run_perturbed(cfg, {"uav_vx": vx + 2.0}, mode, mc_call_counter)
+        # Finite-difference via target shift: wind +0.5~(-2,0), altitude+5~(-5,0), velocity+2~(-4,0)
+        P_w = _compute_p_hit_shift(snapshot, -2.0, 0.0)
+        P_h = _compute_p_hit_shift(snapshot, -5.0, 0.0)
+        P_v = _compute_p_hit_shift(snapshot, -4.0, 0.0)
 
         dP_dW = (P_w - P_base) / 0.5 if 0.5 != 0 else 0.0
         dP_dH = (P_h - P_base) / 5.0 if 5.0 != 0 else 0.0
@@ -116,4 +95,11 @@ def compute_sensitivity(
         )
         snapshot["sensitivity_matrix"] = matrix
         snapshot["dominant_risk_factor"] = ranked[0][0] if ranked else "wind"
+        # Also set sensitivity_live for Control Center Current Factors display
+        snapshot["sensitivity_live"] = {
+            "wind_gradient_raw": dP_dW,
+            "wind_gradient_smoothed": dP_dW,
+            "wind_gradient": dP_dW,
+            "wind_sensitivity": _wind_sensitivity_level(dP_dW),
+        }
         return None

@@ -6,33 +6,19 @@ AX-RELEASE-CORRIDOR-HARDEN-22: Tolerance and resolution safeguard.
 
 from __future__ import annotations
 
+import numpy as np
 from typing import Any
 
 
-def _run_at_offset(
-    config: dict,
-    dx: float,
-    mode: str,
-    mc_call_counter: list | None = None,
-) -> float:
-    """Run evaluation with uav_x offset by dx meters. Returns P_hit. AX-MC-CALL-TRACE-25."""
-    from configs import mission_configs as mcfg
-    from adapter import run_simulation_snapshot
-
-    cfg = dict(config)
-    x0 = float(cfg.get("uav_x", mcfg.uav_pos[0]))
-    cfg["uav_x"] = x0 + dx
-    cfg.pop("simulation_fidelity", None)
-    cfg.pop("uav_pos", None)
-    caller = "CORRIDOR_LEFT" if dx < 0 else "CORRIDOR_RIGHT"
-    snap = run_simulation_snapshot(
-        config_override=cfg,
-        include_advisory=False,
-        caller=caller,
-        trace_mode=mode,
-        mc_call_counter=mc_call_counter,
-    )
-    return float(snap.get("P_hit", 0.0) or 0.0)
+def _compute_p_hit_shift(snapshot: dict, dx: float, dy: float) -> float:
+    """P_hit for target shifted by (dx, dy). Pure NumPy, no propagation."""
+    tp = np.asarray(snapshot["target_position"], dtype=float).flatten()[:2]
+    shifted_target = tp + np.array([dx, dy], dtype=float)
+    impact_pts = np.asarray(snapshot["impact_points"], dtype=float)
+    if impact_pts.size == 0 or impact_pts.ndim != 2 or impact_pts.shape[1] < 2:
+        return 0.0
+    distances = np.linalg.norm(impact_pts[:, :2] - shifted_target, axis=1)
+    return float(np.mean(distances <= snapshot["target_radius"]))
 
 
 def compute_release_corridor(
@@ -54,17 +40,12 @@ def compute_release_corridor(
     threshold = threshold_pct / 100.0
     epsilon_pct = 0.5
     threshold_eff = threshold - (epsilon_pct / 100.0)
-    cfg = dict(config)
-    n_orig = int(cfg.get("n_samples", 1000))
     dx = 1.0
 
     if mode == "standard":
-        n_reduced = max(30, int(n_orig * 0.3))
-        cfg_reduced = dict(cfg)
-        cfg_reduced["n_samples"] = n_reduced
-
-        P_minus = _run_at_offset(cfg_reduced, -dx, mode, mc_call_counter)
-        P_plus = _run_at_offset(cfg_reduced, dx, mode, mc_call_counter)
+        # UAV offset ±dx ~ target shift ∓dx
+        P_minus = _compute_p_hit_shift(snapshot, dx, 0.0)
+        P_plus = _compute_p_hit_shift(snapshot, -dx, 0.0)
 
         both_ok = (P_minus >= threshold_eff) and (P_plus >= threshold_eff)
         one_ok = (P_minus >= threshold_eff) or (P_plus >= threshold_eff)
@@ -84,10 +65,11 @@ def compute_release_corridor(
         return
 
     if mode == "advanced":
+        # Scan dx offsets: UAV +off ~ target shift -off
         offsets = list(range(-5, 6))
         p_hits = []
         for off in offsets:
-            p = _run_at_offset(cfg, float(off), mode, mc_call_counter)
+            p = _compute_p_hit_shift(snapshot, -float(off), 0.0)
             p_hits.append((off, p))
 
         in_corridor = [(o, p) for o, p in p_hits if p >= threshold_eff]
@@ -108,5 +90,11 @@ def compute_release_corridor(
             "min_offset_m": min_offset_m,
             "max_offset_m": max_offset_m,
             "corridor_width_m": corridor_width_m,
+        }
+        # Also set release_corridor_live for Control Center Current Factors display
+        margin_pct = (P_base - threshold) * 100.0
+        snapshot["release_corridor_live"] = {
+            "corridor_width_m": corridor_width_m,  # may be float or "<1.0"
+            "margin_pct": margin_pct,
         }
         return

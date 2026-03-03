@@ -12,6 +12,7 @@ DOCTRINE_DESCRIPTIONS: dict[str, str] = {
     "AGGRESSIVE": "Drop if upper confidence bound exceeds threshold.",
 }
 
+# Minimum samples required for statistical validity. Adaptive sampling must not go below this.
 MIN_VALID_N = 30
 
 

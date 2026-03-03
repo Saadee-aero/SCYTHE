@@ -1,9 +1,17 @@
 """
 Advisory guidance only. No waypoints, no control commands, no optimization.
 Uses the engine as a black box to evaluate drop feasibility.
+
+Single source of PropagationContext creation for deterministic and Monte Carlo paths.
 """
 
 import numpy as np
+
+from product.physics.propagation_context import build_propagation_context
+
+EXPLORER_STATUS_DEFAULT = "NOT_INVOKED"
+EXPLORER_STATUS_FEASIBLE = "FEASIBLE_SHIFT_FOUND"
+EXPLORER_STATUS_OUT_OF_RANGE = "OUT_OF_RANGE"
 
 # Position step for nearby feasibility checks (m). SI.
 ADVISORY_POSITION_DELTA_M = 5.0
@@ -22,65 +30,25 @@ _ENGINE_INPUT_KEYS = (
 )
 
 
-def _run_engine_for_inputs(
-    engine_inputs,
-    probability_threshold,
-    random_seed,
-    *,
-    caller: str = "ANALYTICAL_SWEEP",
-    mode: str = "advanced",
-):
-    """
-    Run engine once with the given scenario. Temporarily applies engine_inputs to config.
-    Returns (P_hit, decision, cep50). Restores config in a finally block.
-    AX-MC-CALL-TRACE-25: caller and mode for advisory sweeps.
-    AX-ADVISORY-MODE-AUDIT-26: diagnostic trace.
-    """
-    print(f"[ADVISORY TRACE] ENTER | mode={mode}")
-    from configs import mission_configs as cfg
-    from src import monte_carlo
-    from src import metrics
-    from src import decision_logic
-
-    saved = {}
-    try:
-        for key in _ENGINE_INPUT_KEYS:
-            saved[key] = getattr(cfg, key)
-        for key, value in engine_inputs.items():
-            setattr(cfg, key, value)
-        impact_points = monte_carlo.run_monte_carlo(
-            cfg.uav_pos,
-            cfg.uav_vel,
-            cfg.mass,
-            cfg.Cd,
-            cfg.A,
-            cfg.rho,
-            cfg.wind_mean,
-            cfg.wind_std,
-            cfg.n_samples,
-            random_seed,
-            dt=cfg.dt,
-            caller=caller,
-            mode=mode,
-        )
-        target_pos = engine_inputs["target_pos"]
-        target_radius = engine_inputs["target_radius"]
-        P_hit = metrics.compute_hit_probability(
-            impact_points, target_pos, target_radius
-        )
-        cep50 = metrics.compute_cep50(impact_points, target_pos)
-        decision = decision_logic.evaluate_drop_decision(
-            P_hit, probability_threshold
-        )
-        return (P_hit, decision, cep50)
-    finally:
-        for key, value in saved.items():
-            setattr(cfg, key, value)
+def _make_context(mass, Cd, area, wind_ref, shear, target_z, dt):
+    """Build context via propagation_context factory."""
+    wind_ref = np.asarray(wind_ref, dtype=float).reshape(3)
+    shear_arr = np.zeros(3, dtype=float) if shear is None else np.asarray(shear, dtype=float).reshape(3)
+    return build_propagation_context(
+        mass=float(mass),
+        Cd=float(Cd),
+        area=float(area),
+        wind_ref=wind_ref,
+        shear=shear_arr,
+        target_z=float(target_z),
+        dt=float(dt),
+    )
 
 
 def get_impact_points_and_metrics(
     mission_state,
     random_seed,
+    config,
     *,
     caller: str = "BASE",
     mode: str = "advanced",
@@ -104,23 +72,28 @@ def get_impact_points_and_metrics(
             saved[key] = getattr(cfg, key)
         for key, value in engine_inputs.items():
             setattr(cfg, key, value)
+        target_pos = engine_inputs["target_pos"]
+        target_z = float(target_pos[2]) if len(target_pos) >= 3 else 0.0
+        context = _make_context(
+            mass=cfg.mass,
+            Cd=cfg.Cd,
+            area=cfg.A,
+            wind_ref=cfg.wind_mean,
+            shear=getattr(cfg, "shear", None),
+            target_z=target_z,
+            dt=cfg.dt,
+        )
         impact_points, impact_speeds = monte_carlo.run_monte_carlo(
+            context,
             cfg.uav_pos,
             cfg.uav_vel,
-            cfg.mass,
-            cfg.Cd,
-            cfg.A,
-            cfg.rho,
-            cfg.wind_mean,
             cfg.wind_std,
-            cfg.n_samples,
+            config,
             random_seed,
-            dt=cfg.dt,
             return_impact_speeds=True,
             caller=caller,
             mode=mode,
         )
-        target_pos = engine_inputs["target_pos"]
         target_radius = engine_inputs["target_radius"]
         P_hit = metrics.compute_hit_probability(
             impact_points, target_pos, target_radius
@@ -131,6 +104,56 @@ def get_impact_points_and_metrics(
     finally:
         for key, value in saved.items():
             setattr(cfg, key, value)
+
+
+def enrich_snapshot_with_opportunity_explorer(
+    snapshot: dict,
+    uav_pos,
+    uav_vel,
+    payload_config: dict,
+    wind_ref,
+    shear,
+    target_position,
+    target_radius: float,
+) -> None:
+    """
+    When decision == "NO DROP", run 1D opportunity explorer and attach results.
+    Mutates snapshot in place. Always sets snapshot["explorer_status"].
+    """
+    from product.guidance.opportunity_explorer import find_release_shift_1d
+
+    decision = str(snapshot.get("decision", "")).strip().upper()
+    if decision != "NO DROP":
+        snapshot["explorer_status"] = EXPLORER_STATUS_DEFAULT
+        return
+
+    target_z = float(target_position[2]) if len(target_position) >= 3 else 0.0
+    context = _make_context(
+        mass=payload_config.get("mass", payload_config.get("mass_kg", 1.0)),
+        Cd=payload_config.get("cd", payload_config.get("Cd", 0.47)),
+        area=payload_config.get("area", payload_config.get("A", 0.01)),
+        wind_ref=wind_ref,
+        shear=shear,
+        target_z=target_z,
+        dt=0.01,
+    )
+    shift_m, miss, feasible = find_release_shift_1d(
+        uav_pos,
+        uav_vel,
+        context,
+        target_position,
+        target_radius,
+    )
+    print(f"[EXPLORER] shift={shift_m:.1f} feasible={feasible}")
+
+    if feasible:
+        snapshot["suggested_shift_m"] = shift_m
+        v_xy = np.asarray(uav_vel, dtype=float)[:2]
+        speed = float(np.linalg.norm(v_xy))
+        snapshot["suggested_time_s"] = shift_m / speed if speed > 1e-9 else 0.0
+        snapshot["explorer_status"] = EXPLORER_STATUS_FEASIBLE
+    else:
+        snapshot["explorer_status"] = EXPLORER_STATUS_OUT_OF_RANGE
 
 
 def _resolve_threshold(decision_policy):
@@ -170,23 +193,39 @@ class AdvisoryResult:
         self.degradation_directions = tuple(degradation_directions)
 
 
+def _p_hit_shifted_target(impact_points, target_pos, target_radius, target_shift_xy):
+    """
+    Compute P_hit for the same impact points with target shifted by target_shift_xy.
+    Vectorized: radial_distances = norm(impact_points - (target + shift), axis=1).
+    """
+    impact_arr = np.asarray(impact_points, dtype=float)
+    if impact_arr.size == 0 or impact_arr.ndim != 2 or impact_arr.shape[1] < 2:
+        return 0.0
+    target_2d = np.asarray(target_pos, dtype=float).flatten()[:2]
+    shifted_target = target_2d + np.asarray(target_shift_xy, dtype=float).reshape(2)
+    radial_distances = np.linalg.norm(impact_arr[:, :2] - shifted_target, axis=1)
+    hits = int(np.sum(radial_distances <= target_radius))
+    return float(hits) / float(impact_arr.shape[0])
+
+
 def evaluate_advisory(
-    mission_state,
+    snapshot,
     decision_policy,
-    random_seed=42,
     position_delta_m=None,
     *,
     trace_mode: str = "advanced",
 ):
     """
-    Evaluate drop feasibility at current UAV state and at small position variations.
-    Returns an AdvisoryResult: feasibility at current position, relative trend nearby,
-    and a qualitative suggested direction. No waypoints or commands.
+    Evaluate drop feasibility at current UAV state and directional trend using
+    base simulation snapshot. No Monte Carlo or propagation; reuses impact_points.
 
-    mission_state: MissionState instance (payload, target, environment, UAV state).
-    decision_policy: float in [0, 1] (probability threshold) or str ('Conservative'|'Balanced'|'Aggressive').
-    random_seed: int, for deterministic engine runs.
-    position_delta_m: float, step for position variations (m). Default ADVISORY_POSITION_DELTA_M.
+    snapshot: Base simulation result (impact_points, P_hit, cep50, target_position, target_radius).
+    decision_policy: float in [0, 1] (threshold) or str ('Conservative'|'Balanced'|'Aggressive').
+    position_delta_m: float, position step for directional checks (m). Default ADVISORY_POSITION_DELTA_M.
+    trace_mode: unused; kept for API compatibility.
+
+    Returns AdvisoryResult: feasibility at current position, relative trend nearby,
+    and suggested direction.
     """
     probability_threshold = _resolve_threshold(decision_policy)
     if position_delta_m is None:
@@ -195,41 +234,29 @@ def evaluate_advisory(
     if delta <= 0:
         raise ValueError("position_delta_m must be positive")
 
-    mission_state.validate()
-    base_inputs = mission_state.export_engine_inputs()
-    uav_pos = list(base_inputs["uav_pos"])
+    impact_points = snapshot.get("impact_points")
+    P_hit_current = float(snapshot.get("P_hit", 0.0) or 0.0)
+    cep50_current = float(snapshot.get("cep50", 0.0) or 0.0)
+    target_pos = np.asarray(snapshot.get("target_position"), dtype=float).flatten()[:2]
+    target_radius = float(snapshot.get("target_radius", 0.0))
 
-    P_hit_current, decision_current, cep50_current = _run_engine_for_inputs(
-        base_inputs, probability_threshold, random_seed,
-        caller="ANALYTICAL_SWEEP", mode=trace_mode,
+    from src import decision_logic
+    decision_current = decision_logic.evaluate_drop_decision(
+        P_hit_current, probability_threshold
     )
 
-    forward_inputs = dict(base_inputs)
-    forward_inputs["uav_pos"] = (uav_pos[0] + delta, uav_pos[1], uav_pos[2])
-    P_forward, _, _ = _run_engine_for_inputs(
-        forward_inputs, probability_threshold, random_seed,
-        caller="ANALYTICAL_SWEEP", mode=trace_mode,
+    # UAV +delta X (forward) ~ impact cloud +delta X ~ shift target -delta X
+    P_forward = _p_hit_shifted_target(
+        impact_points, target_pos, target_radius, (-delta, 0.0)
     )
-
-    backward_inputs = dict(base_inputs)
-    backward_inputs["uav_pos"] = (uav_pos[0] - delta, uav_pos[1], uav_pos[2])
-    P_backward, _, _ = _run_engine_for_inputs(
-        backward_inputs, probability_threshold, random_seed,
-        caller="ANALYTICAL_SWEEP", mode=trace_mode,
+    P_backward = _p_hit_shifted_target(
+        impact_points, target_pos, target_radius, (delta, 0.0)
     )
-
-    right_inputs = dict(base_inputs)
-    right_inputs["uav_pos"] = (uav_pos[0], uav_pos[1] + delta, uav_pos[2])
-    P_right, _, _ = _run_engine_for_inputs(
-        right_inputs, probability_threshold, random_seed,
-        caller="ANALYTICAL_SWEEP", mode=trace_mode,
+    P_right = _p_hit_shifted_target(
+        impact_points, target_pos, target_radius, (0.0, -delta)
     )
-
-    left_inputs = dict(base_inputs)
-    left_inputs["uav_pos"] = (uav_pos[0], uav_pos[1] - delta, uav_pos[2])
-    P_left, _, _ = _run_engine_for_inputs(
-        left_inputs, probability_threshold, random_seed,
-        caller="ANALYTICAL_SWEEP", mode=trace_mode,
+    P_left = _p_hit_shifted_target(
+        impact_points, target_pos, target_radius, (0.0, delta)
     )
 
     best_P = max(P_forward, P_backward, P_right, P_left)

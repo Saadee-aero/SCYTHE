@@ -18,38 +18,20 @@ def quick_stability_check(
     PASS when relative error < 2%, else CAUTION.
     """
     from configs import mission_configs as cfg
+    from product.guidance.advisory_layer import build_propagation_context
     from src import monte_carlo, metrics
 
     n = int(samples)
     dt_base = float(dt)
     dt_half = dt_base / 2.0 if dt_base > 0 else dt_base
 
-    impact_dt = monte_carlo.run_monte_carlo(
-        cfg.uav_pos,
-        cfg.uav_vel,
-        cfg.mass,
-        cfg.Cd,
-        cfg.A,
-        cfg.rho,
-        cfg.wind_mean,
-        cfg.wind_std,
-        n,
-        random_seed,
-        dt=dt_base,
-    )
-    impact_half = monte_carlo.run_monte_carlo(
-        cfg.uav_pos,
-        cfg.uav_vel,
-        cfg.mass,
-        cfg.Cd,
-        cfg.A,
-        cfg.rho,
-        cfg.wind_mean,
-        cfg.wind_std,
-        n,
-        random_seed,
-        dt=dt_half,
-    )
+    target_z = float(cfg.target_pos[2]) if len(cfg.target_pos) >= 3 else 0.0
+    cfg_dict = {"n_samples": n}
+
+    ctx_dt = build_propagation_context(cfg.mass, cfg.Cd, cfg.A, cfg.wind_mean, None, target_z, dt_base)
+    ctx_half = build_propagation_context(cfg.mass, cfg.Cd, cfg.A, cfg.wind_mean, None, target_z, dt_half)
+    impact_dt = monte_carlo.run_monte_carlo(ctx_dt, cfg.uav_pos, cfg.uav_vel, cfg.wind_std, cfg_dict, random_seed)
+    impact_half = monte_carlo.run_monte_carlo(ctx_half, cfg.uav_pos, cfg.uav_vel, cfg.wind_std, cfg_dict, random_seed)
 
     cep_dt = metrics.compute_cep50(impact_dt, cfg.target_pos)
     cep_half = metrics.compute_cep50(impact_half, cfg.target_pos)

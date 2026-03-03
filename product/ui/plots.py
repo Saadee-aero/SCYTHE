@@ -51,7 +51,7 @@ def plot_impact_dispersion(
     No simulation change; rendering only.
     """
     impact_points = np.asarray(impact_points, dtype=float)
-    target_position = np.asarray(target_position, dtype=float).reshape(2)
+    target_position = np.asarray(target_position, dtype=float).flatten()[:2]
     r_target = float(target_radius) if target_radius is not None else 0.0
     r_cep = float(cep50) if (cep50 is not None and cep50 > 0) else 0.0
     is_standard = (mode == "standard")

@@ -16,7 +16,7 @@ def compute_hit_probability(impact_points, target_position, target_radius):
         raise ValueError("impact_points must not be empty")
     if impact_points.shape[1] != 2:
         raise ValueError("impact_points must have shape (N, 2)")
-    target_2d = target_position.reshape(2)
+    target_2d = np.asarray(target_position, dtype=float).flatten()[:2]
     radius = float(target_radius)
     radial_distances = np.linalg.norm(impact_points - target_2d, axis=1)
     hits = np.sum(radial_distances <= radius)
@@ -34,7 +34,7 @@ def compute_cep50(impact_points, target_position):
         raise ValueError("impact_points must not be empty")
     if impact_points.shape[1] != 2:
         raise ValueError("impact_points must have shape (N, 2)")
-    target_2d = target_position.reshape(2)
+    target_2d = np.asarray(target_position, dtype=float).flatten()[:2]
     radial_distances = np.linalg.norm(impact_points - target_2d, axis=1)
     return float(np.percentile(radial_distances, 50))
 

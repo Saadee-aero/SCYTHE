@@ -96,11 +96,18 @@ def run_simulation_from_config(
     ) = get_impact_points_and_metrics(
         mission_state,
         random_seed,
+        {"n_samples": cfg.n_samples},
     )
+    base_snapshot = {
+        "impact_points": impact_points,
+        "P_hit": P_hit,
+        "cep50": cep50,
+        "target_position": mission_state.target.position,
+        "target_radius": mission_state.target.radius,
+    }
     advisory_result = evaluate_advisory(
-        mission_state,
+        base_snapshot,
         cfg.THRESHOLD_SLIDER_INIT / 100.0,
-        random_seed=random_seed,
     )
     m = mission_state.payload.mass
     cd = mission_state.payload.drag_coefficient

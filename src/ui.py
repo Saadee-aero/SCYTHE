@@ -7,7 +7,7 @@ from src import decision_logic
 
 def launch_ui(impact_points, P_hit, cep50):
     impact_points = np.asarray(impact_points, dtype=float)
-    target_center = np.array(cfg.target_pos, dtype=float).reshape(2)
+    target_center = np.array(cfg.target_pos, dtype=float).flatten()[:2]
     target_radius = cfg.target_radius
 
     fig, ax = plt.subplots(figsize=(8, 8))

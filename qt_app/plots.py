@@ -111,7 +111,7 @@ class ImpactDispersionCanvas(FigureCanvasQTAgg):
         self._style_axes()
 
         impact_points = np.asarray(snapshot.get("impact_points", []), dtype=float)
-        target_center = np.asarray(snapshot.get("target_position", (0.0, 0.0)), dtype=float).reshape(2)
+        target_center = np.asarray(snapshot.get("target_position", (0.0, 0.0)), dtype=float).flatten()[:2]
         target_radius = float(snapshot.get("target_radius", 0.0) or 0.0)
         wind_vector = snapshot.get("wind_vector")
         P_hit = snapshot.get("P_hit")

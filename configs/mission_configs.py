@@ -17,16 +17,16 @@ Cd = 1.0
 uav_pos = (0.0, 0.0, 100.0)
 uav_vel = (20.0, 0.0, 0.0)
 
-# Target (m)
-target_pos = (72.0, 0.0)
+# Target (m). target_pos = (x, y, z); z = target elevation (ground level for impact).
+target_pos = (72.0, 0.0, 0.0)
 target_radius = 5.0
 
 # Wind model: mean (m/s), std (m/s)
 wind_mean = (2.0, 0.0, 0.0)
 wind_std = 0.8
 
-# Monte Carlo
-n_samples = 300
+# Monte Carlo. Canonical default sample count = 1000.
+n_samples = 1000
 
 # Reproducibility
 RANDOM_SEED = 42

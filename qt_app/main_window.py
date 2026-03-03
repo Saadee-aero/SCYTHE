@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
+    QLineEdit,
     QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
@@ -32,7 +33,6 @@ from evaluation_worker import EvaluationWorker, TelemetryState, ConfigState
 from snapshot_validation import validate_snapshot
 from src.decision_stability import enrich_evaluation_snapshot
 from mission_config_tab import MissionConfigTab
-from side_panel import MissionConfigPanel
 from telemetry import TelemetryWorker
 from widgets import NoWheelDoubleSpinBox, NoWheelSlider, StatusStrip
 from product.ui import qt_bridge
@@ -139,6 +139,9 @@ class MainWindow(QMainWindow):
             "n_samples": 1000,
             "random_seed": 42,
         }
+        self._telemetry_source = "mock"
+        self._telemetry_file_path: str | None = None
+        self._auto_eval_interval = "OFF"
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self.auto_evaluate)
@@ -170,17 +173,9 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(12, 0, 12, 12)
         root.setSpacing(12)
 
-        # Left panel: kept for data binding but hidden (disabled/removed from UI)
-        self.panel_container = QFrame(central)
-        panel_layout = QHBoxLayout(self.panel_container)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        self.left_panel = MissionConfigPanel(self.panel_container)
-        panel_layout.addWidget(self.left_panel)
-        self.panel_container.hide()
-        self.system_mode = self.left_panel.system_mode()
-        self.left_panel.system_mode_combo.currentTextChanged.connect(self._on_system_mode_changed)
+        self.system_mode = "SNAPSHOT"
 
-        # Right side: tab navigation and bottom status strip (full width).
+        # Tab navigation and bottom status strip (full width).
         right_container = QWidget(central)
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -218,28 +213,15 @@ class MainWindow(QMainWindow):
 
         self.status_strip = StatusStrip(right_container)
         right_layout.addWidget(self.status_strip)
-        # Footer visible only on Analysis tab (hidden on Control Center)
-        self.status_strip.setVisible(
-            self.main_tabs.currentIndex() == self.main_tabs.indexOf(self.analysis_tab)
-        )
+        self.status_strip.setVisible(False)  # Footer (Snapshot ID, Telemetry) removed
 
         root.addWidget(right_container, 1)
-        # Left panel not added to layout - effectively removed from UI
         self.setCentralWidget(central)
-        self.left_panel.set_snapshot_id("---")
-        self.left_panel.apply_state(self.system_mode, False)
-        self.left_panel.auto_eval_combo.currentTextChanged.connect(self._on_auto_eval_changed)
-        self.left_panel.threshold_pct.valueChanged.connect(self._on_threshold_changed)
-        self.left_panel.random_seed.valueChanged.connect(lambda _: self._render_system_tab())
+        self._live_auto_eval_combo.currentTextChanged.connect(self._on_auto_eval_changed)
         self.target_radius_slider.valueChanged.connect(self._on_target_radius_slider_changed)
         self.target_radius_spinbox.valueChanged.connect(self._on_target_radius_spinbox_changed)
-        self.left_panel.num_samples.valueChanged.connect(lambda _: self._render_system_tab())
         self.status_strip.snapshot_label.setText("Snapshot ID: --- | Ready")
         self.status_strip.telemetry_label.setText("Telemetry: LIVE")
-        self.left_panel.set_telemetry_health(0.0, 0.0, "LIVE")
-        self.left_panel.set_simulation_age(None)
-        self.left_panel.set_auto_evaluate_paused(False)
-        self.left_panel.telemetry_source_apply_requested.connect(self._on_telemetry_source_apply)
         # Initialize application state (Operator Mode only) - but don't restrict tabs
         if self.current_mode == "operator":
             self.app_state = AppState.NO_PAYLOAD
@@ -248,6 +230,7 @@ class MainWindow(QMainWindow):
         with self.config_state.lock:
             cfg = dict(self.config_state.data)
         self.mission_config_tab.init_from_config(cfg)
+        self.mission_config_tab.apply_system_mode(self.system_mode)
         tr = float(cfg.get("target_radius", 5.0))
         tr_clamp = min(50.0, max(0.5, tr))
         self.target_radius_spinbox.setValue(tr_clamp)
@@ -327,6 +310,31 @@ class MainWindow(QMainWindow):
         self.live_mode_label.setStyleSheet("font-size: 10px; color: #ff4444; font-weight: bold;")
         execution_layout.addWidget(self.live_mode_label)
         self.live_mode_label.hide()
+        self._live_options_row = QHBoxLayout()
+        self._live_telemetry_combo = QComboBox(execution_group)
+        self._live_telemetry_combo.addItem("Mock", "mock")
+        self._live_telemetry_combo.addItem("File", "file")
+        self._live_telemetry_combo.setStyleSheet("font-size: 11px; min-height: 24px;")
+        self._live_telemetry_path = QLineEdit(execution_group)
+        self._live_telemetry_path.setPlaceholderText("Path to CSV...")
+        self._live_telemetry_path.setStyleSheet("font-size: 11px; min-height: 24px;")
+        self._live_telemetry_apply_btn = QPushButton("Apply", execution_group)
+        self._live_telemetry_apply_btn.setStyleSheet("font-size: 11px;")
+        self._live_telemetry_apply_btn.clicked.connect(self._on_telemetry_source_apply)
+        self._live_auto_eval_combo = QComboBox(execution_group)
+        self._live_auto_eval_combo.addItems(["OFF", "1s", "2s"])
+        self._live_auto_eval_combo.setStyleSheet("font-size: 11px; min-height: 24px;")
+        _live_lbl = QLabel("Telemetry:", execution_group)
+        _live_lbl.setStyleSheet("font-size: 11px; color: #86a886;")
+        self._live_options_row.addWidget(_live_lbl)
+        self._live_options_row.addWidget(self._live_telemetry_combo)
+        self._live_options_row.addWidget(self._live_telemetry_path, 1)
+        self._live_options_row.addWidget(self._live_telemetry_apply_btn)
+        _ae_lbl = QLabel("Auto-eval:", execution_group)
+        _ae_lbl.setStyleSheet("font-size: 11px; color: #86a886;")
+        self._live_options_row.addWidget(_ae_lbl)
+        self._live_options_row.addWidget(self._live_auto_eval_combo)
+        execution_layout.addLayout(self._live_options_row)
         decision_row.addWidget(execution_group)
 
         # 3.1 LEFT CARD — Mission Inputs (Mode, HIT %, HITS)
@@ -663,9 +671,6 @@ class MainWindow(QMainWindow):
         """Update config_state when threshold changes in Mission Config tab."""
         with self.config_state.lock:
             self.config_state.data["threshold_pct"] = value
-        self.left_panel.threshold_pct.blockSignals(True)
-        self.left_panel.threshold_pct.setValue(value)
-        self.left_panel.threshold_pct.blockSignals(False)
         self._render_mission_tab()
 
     @Slot(dict)
@@ -693,6 +698,7 @@ class MainWindow(QMainWindow):
         self._update_summary_strip_after_commit()
         self.main_tabs.setCurrentWidget(self.mission_tab)
         self._render_mission_tab()
+        self._render_system_tab()
         self._update_app_state_ui()
 
     @Slot(bool)
@@ -840,7 +846,7 @@ class MainWindow(QMainWindow):
         self, snapshot, decision, p_hit, cep50, threshold, advisory, impact_points,
         paused_info=None, config_only: bool = False, robustness_status: str = "",
     ) -> None:
-        """Render Control Center tab. All data from snapshot only—no left_panel or live telemetry reads."""
+        """Render Control Center tab. All data from snapshot only."""
         snapshot_type = snapshot.get("snapshot_type")
         if snapshot_type not in ("CONFIG", "EVALUATION"):
             snapshot_type = "CONFIG"
@@ -1041,7 +1047,34 @@ class MainWindow(QMainWindow):
         # Advisory column (doctrine reason when available, else advisory)
         decision_reason = snapshot.get("decision_reason")
         doctrine_desc = snapshot.get("doctrine_description")
-        if advisory:
+        explorer_status = snapshot.get("explorer_status", "")
+        if decision_upper == "DROP":
+            if advisory:
+                self.advisory_reason_label.setText(f"Reason: {advisory.current_feasibility}")
+                self.advisory_stat_note_label.setText(f"Statistical note: {getattr(advisory, 'trend_summary', '—')}")
+                suggested = getattr(advisory, "suggested_direction", "Hold Position")
+                self.advisory_actions_label.setText(f"Actions: • {suggested}")
+            elif decision_reason:
+                self.advisory_reason_label.setText(f"Reason: {decision_reason}")
+                self.advisory_stat_note_label.setText(f"Doctrine: {doctrine_desc or '—'}")
+                self.advisory_actions_label.setText("Actions: —")
+            else:
+                self.advisory_reason_label.setText("Reason: —")
+                self.advisory_stat_note_label.setText("Statistical note: —")
+                self.advisory_actions_label.setText("Actions: —")
+        elif explorer_status == "FEASIBLE_SHIFT_FOUND":
+            shift_m = snapshot.get("suggested_shift_m", 0.0)
+            time_s = snapshot.get("suggested_time_s", 0.0)
+            self.advisory_reason_label.setText(
+                f"NO DROP — Move forward {shift_m:.1f} m (~{time_s:.1f} s) to enter release window."
+            )
+            self.advisory_stat_note_label.setText("Statistical note: —")
+            self.advisory_actions_label.setText("Actions: —")
+        elif explorer_status == "OUT_OF_RANGE":
+            self.advisory_reason_label.setText("NO DROP — Target out of geometric range.")
+            self.advisory_stat_note_label.setText("Statistical note: —")
+            self.advisory_actions_label.setText("Actions: —")
+        elif advisory:
             self.advisory_reason_label.setText(f"Reason: {advisory.current_feasibility}")
             self.advisory_stat_note_label.setText(f"Statistical note: {getattr(advisory, 'trend_summary', '—')}")
             suggested = getattr(advisory, "suggested_direction", "Hold Position")
@@ -1070,11 +1103,16 @@ class MainWindow(QMainWindow):
         # AX-MISS-TOPOLOGY-HYBRID-12: Drift (LIVE mode)
         topo_live = snapshot.get("topology_live") or {}
         drift_str = topo_live.get("drift_axis", "—")
-        self.drift_label.setText(f"Drift: <span style='{_val}'>{drift_str.title()}</span>")
+        self.drift_label.setText(f"Drift: <span style='{_val}'>{drift_str.title() if isinstance(drift_str, str) else str(drift_str)}</span>")
         # AX-RELEASE-CORRIDOR-19: Release corridor (LIVE mode)
         rc_live = snapshot.get("release_corridor_live") or {}
         rc_w = rc_live.get("corridor_width_m")
-        rc_str = f"{rc_w:.1f} m" if rc_w is not None else "—"
+        if rc_w is None:
+            rc_str = "—"
+        elif isinstance(rc_w, str):
+            rc_str = rc_w
+        else:
+            rc_str = f"{float(rc_w):.1f} m"
         self.release_corridor_label.setText(f"Release Corridor: <span style='{_val}'>{rc_str}</span>")
 
     def _apply_new_sim_card_style(self, hovered: bool = False) -> None:
@@ -1118,6 +1156,12 @@ class MainWindow(QMainWindow):
                 self._show_warning("Configure payload before running simulation.")
                 return
             self._execution_mode = "LIVE"
+            self.system_mode = "LIVE"
+            self.mission_config_tab.apply_system_mode("LIVE")
+            self.auto_evaluate_paused = False
+            self._apply_live_telemetry_to_config()
+            self._push_config_to_worker()
+            self._start_evaluation_worker()
             self.live_btn.setText("STOP")
             self.live_btn.setStyleSheet("font-size: 14px; color: white; background-color: #cc3333;")
             self.run_once_btn.setEnabled(False)
@@ -1126,6 +1170,10 @@ class MainWindow(QMainWindow):
             self._live_timer.start()
         else:
             self._execution_mode = "MANUAL"
+            self.system_mode = "SNAPSHOT"
+            self.mission_config_tab.apply_system_mode("SNAPSHOT")
+            self.auto_timer.stop()
+            self._stop_evaluation_worker()
             self.live_btn.setText("LIVE")
             self.live_btn.setStyleSheet("font-size: 14px; color: #22cc22;")
             self.run_once_btn.setEnabled(True)
@@ -1142,7 +1190,6 @@ class MainWindow(QMainWindow):
 
     def _on_new_simulation_clicked(self) -> None:
         """Unlock current snapshot and navigate to Mission Config for reconfiguration."""
-        self.left_panel.set_read_only(False)
         self.snapshot_active = False
         self.app_state = AppState.PAYLOAD_SELECTED
         # Preserve threshold_pct from config_state (packet-driven invariant; no UI read during render)
@@ -1156,31 +1203,35 @@ class MainWindow(QMainWindow):
         self.status_strip.snapshot_label.setText("Snapshot ID: --- | New Simulation — Configure & Run")
         self._render_mission_tab()
 
+    def _resolve_n_samples(self, snapshot: dict | None) -> int:
+        """Resolve sample count from snapshot or config_state (single source of truth)."""
+        if snapshot and snapshot.get("n_samples") is not None:
+            return int(snapshot["n_samples"])
+        with self.config_state.lock:
+            return int(self.config_state.data.get("n_samples", 1000))
+
     def _render_analysis_tab(self) -> None:
         snapshot = self._latest_snapshot or {}
         impact_points = snapshot.get("impact_points", [])
-        # --- PHASE 5: Analytical cloud trace ---
-        print("ANALYTICAL MODE:", self.current_mode)
-        print("IMPACT COUNT:", len(impact_points))
         p_hit = float(snapshot.get("P_hit", 0.0) or 0.0)
         cep50 = float(snapshot.get("cep50", 0.0) or 0.0)
+        with self.config_state.lock:
+            cfg = dict(self.config_state.data)
+        target_pos = snapshot.get("target_position") or (cfg.get("target_x", 0.0), cfg.get("target_y", 0.0), cfg.get("target_elevation", 0.0))
+        target_rad = float(snapshot.get("target_radius") or cfg.get("target_radius", 5.0) or 5.0)
+        uav_pos = (float(cfg.get("uav_x", 0.0)), float(cfg.get("uav_y", 0.0)), float(cfg.get("uav_altitude", 100.0)))
+        wind_x = float(cfg.get("wind_x", 2.0))
+        random_seed_val = int(cfg.get("random_seed", 42))
 
         self.analysis_fig.clear()
         ax = self.analysis_fig.add_subplot(1, 1, 1)
         analysis_tab_renderer.render(
             ax,
             impact_points=impact_points,
-            target_position=snapshot.get(
-                "target_position",
-                (float(self.left_panel.target_x.value()), float(self.left_panel.target_y.value())),
-            ),
-            target_radius=float(snapshot.get("target_radius", self.left_panel.target_radius.value()) or 0.0),
-            uav_position=(
-                float(self.left_panel.uav_x.value()),
-                float(self.left_panel.uav_y.value()),
-                float(self.left_panel.uav_altitude.value()),
-            ),
-            wind_mean=(float(self.left_panel.wind_x.value()), 0.0, 0.0),
+            target_position=target_pos,
+            target_radius=target_rad,
+            uav_position=uav_pos,
+            wind_mean=(wind_x, 0.0, 0.0),
             cep50=cep50,
             target_hit_percentage=p_hit * 100.0,
             impact_velocity_stats=snapshot.get("impact_velocity_stats"),
@@ -1191,18 +1242,24 @@ class MainWindow(QMainWindow):
             release_corridor_matrix=snapshot.get("release_corridor_matrix"),
             fragility_state=snapshot.get("fragility_state"),
             uncertainty_contribution=snapshot.get("uncertainty_contribution"),
-                dispersion_mode=self.current_mode,
-                view_zoom=1.0,  # Fixed zoom, use matplotlib toolbar for zooming
-                snapshot_timestamp=(
+            prob_vs_distance=snapshot.get("prob_vs_distance"),
+            prob_vs_wind_uncertainty=snapshot.get("prob_vs_wind_uncertainty"),
+            dispersion_mode=self.current_mode,
+            view_zoom=1.0,
+            snapshot_timestamp=(
                 self._snapshot_created_at.strftime("%Y-%m-%d %H:%M:%S")
                 if self._snapshot_created_at is not None
                 else None
             ),
-            random_seed=int(self.left_panel.random_seed.value()),
-            n_samples=int(self.left_panel.num_samples.value()),
+            random_seed=random_seed_val,
+            n_samples=self._resolve_n_samples(snapshot),
+            ci_low=snapshot.get("ci_low"),
+            ci_high=snapshot.get("ci_high"),
+            threshold_pct=snapshot.get("threshold_pct"),
+            p_hit=p_hit,
         )
         try:
-            self.analysis_fig.tight_layout()
+            self.analysis_fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
         except Exception:
             pass
         self.analysis_canvas.draw_idle()
@@ -1214,10 +1271,13 @@ class MainWindow(QMainWindow):
     def _render_sensor_tab(self) -> None:
         self.telemetry_fig.clear()
         ax = self.telemetry_fig.add_subplot(1, 1, 1)
-        wind_x = float(self.left_panel.wind_x.value())
-        wind_std = float(self.left_panel.wind_std.value())
-        uav_alt = float(self.left_panel.uav_altitude.value())
-        uav_vx = float(self.left_panel.uav_vx.value())
+        telem = self._last_telemetry or {}
+        with self.config_state.lock:
+            cfg = dict(self.config_state.data)
+        wind_x = float(telem.get("wind_x", cfg.get("wind_x", 2.0)))
+        wind_std = float(telem.get("wind_std", cfg.get("wind_std", 0.8)))
+        uav_alt = float(telem.get("z", cfg.get("uav_altitude", 100.0)))
+        uav_vx = float(telem.get("vx", cfg.get("uav_vx", 20.0)))
         telem_age = float(self._last_telemetry.get("age_s", 0.0) or 0.0)
         telem_status = str(self._last_telemetry.get("status", "Fresh"))
         wind_speed = abs(wind_x)
@@ -1255,11 +1315,14 @@ class MainWindow(QMainWindow):
         warnings = ["No active warnings."]
         if self.system_mode == "LIVE" and self.auto_evaluate_paused:
             warnings = ["Auto-evaluate paused due to performance threshold (>1.5s run)."]
+        snapshot = self._latest_snapshot or {}
+        with self.config_state.lock:
+            cfg_data = dict(self.config_state.data)
         system_status.render(
             ax,
-            random_seed=int(self.left_panel.random_seed.value()),
-            n_samples=int(self.left_panel.num_samples.value()),
-            dt=float(cfg.dt),
+            random_seed=int(cfg_data.get("random_seed", cfg.RANDOM_SEED)),
+            n_samples=self._resolve_n_samples(snapshot),
+            dt=float(cfg.dt) if hasattr(cfg, "dt") else 0.01,
             snapshot_created_at=self._snapshot_created_at,
             warnings=warnings,
         )
@@ -1298,7 +1361,7 @@ class MainWindow(QMainWindow):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
             }
-            QWidget#leftPanel, QFrame#plotPlaceholder, QFrame#statusStrip,
+            QFrame#plotPlaceholder, QFrame#statusStrip,
             QFrame#decisionCardInputs, QFrame#decisionStateCard, QFrame#decisionCardStats,
             QFrame#advisoryColumn {
                 background-color: #0a110a;
@@ -1417,7 +1480,6 @@ class MainWindow(QMainWindow):
         self.current_mode = mode
         self._refresh_mode_buttons()
         self._switch_mission_tab_layout()
-        self._update_left_panel_visibility()
         # Re-initialize app state if switching to Standard Mode
         if mode == "standard":
             if self.app_state == AppState.NO_PAYLOAD:
@@ -1442,15 +1504,7 @@ class MainWindow(QMainWindow):
         pass
 
     def _on_tab_changed(self, index: int) -> None:
-        """Handle tab change - update left panel visibility and footer (status strip)."""
-        self._update_left_panel_visibility()
-        # Show status strip (Snapshot ID, Telemetry) only on Analysis tab
-        if hasattr(self, "status_strip"):
-            show_footer = index == self.main_tabs.indexOf(self.analysis_tab)
-            self.status_strip.setVisible(show_footer)
-
-    def _update_left_panel_visibility(self) -> None:
-        """Left panel removed from UI - no-op."""
+        """Handle tab change."""
         pass
 
     def _refresh_mode_buttons(self) -> None:
@@ -1504,9 +1558,6 @@ class MainWindow(QMainWindow):
         self.target_radius_spinbox.blockSignals(True)
         self.target_radius_spinbox.setValue(val)
         self.target_radius_spinbox.blockSignals(False)
-        self.left_panel.target_radius.blockSignals(True)
-        self.left_panel.target_radius.setValue(val)
-        self.left_panel.target_radius.blockSignals(False)
         with self.config_state.lock:
             self.config_state.data["target_radius"] = val
         self._render_mission_tab()
@@ -1515,37 +1566,9 @@ class MainWindow(QMainWindow):
         self.target_radius_slider.blockSignals(True)
         self.target_radius_slider.setValue(int((value - 0.5) / 0.5) + 1)
         self.target_radius_slider.blockSignals(False)
-        self.left_panel.target_radius.blockSignals(True)
-        self.left_panel.target_radius.setValue(value)
-        self.left_panel.target_radius.blockSignals(False)
         with self.config_state.lock:
             self.config_state.data["target_radius"] = value
         self._render_mission_tab()
-
-    @Slot(str)
-    def _on_system_mode_changed(self, mode: str) -> None:
-        raw = str(mode or "SNAPSHOT").strip().upper()
-        if raw.startswith("LIVE"):
-            next_mode = "LIVE"
-        elif raw.startswith("SNAP"):
-            next_mode = "SNAPSHOT"
-        else:
-            next_mode = self.left_panel.system_mode()
-            if next_mode not in ("SNAPSHOT", "LIVE"):
-                next_mode = "SNAPSHOT"
-        self.system_mode = next_mode
-        self.left_panel.set_system_mode(next_mode)
-        self.auto_evaluate_paused = False
-        self.left_panel.set_auto_evaluate_paused(False)
-        if next_mode != "LIVE":
-            self.auto_timer.stop()
-            self._stop_evaluation_worker()
-        else:
-            self._apply_live_telemetry_to_panel()
-            self._push_config_to_worker()
-            self._start_evaluation_worker()
-        self._update_evaluate_button_text()
-        self._render_sensor_tab()
 
     @Slot(str)
     def _on_auto_eval_changed(self, value: str) -> None:
@@ -1553,18 +1576,16 @@ class MainWindow(QMainWindow):
             self.auto_timer.stop()
             return
         value_norm = str(value).strip().upper()
+        self._auto_eval_interval = value_norm
         if value_norm == "OFF":
             self.auto_timer.stop()
             self.auto_evaluate_paused = False
-            self.left_panel.set_auto_evaluate_paused(False)
             return
         if value_norm == "1S":
             self.auto_timer.start(1000)
-            self.left_panel.set_auto_evaluate_paused(self.auto_evaluate_paused)
             return
         if value_norm == "2S":
             self.auto_timer.start(2000)
-            self.left_panel.set_auto_evaluate_paused(self.auto_evaluate_paused)
 
     @Slot()
     def auto_evaluate(self) -> None:
@@ -1595,7 +1616,6 @@ class MainWindow(QMainWindow):
             return
 
         # Unlock only; do not run simulation.
-        self.left_panel.set_read_only(False)
         self.snapshot_active = False
         self._update_evaluate_button_text()
         self.status_strip.snapshot_label.setText(
@@ -1648,7 +1668,6 @@ class MainWindow(QMainWindow):
         if self._simulation_started_at is not None:
             run_duration_sec = max(0.0, self._last_eval_time - self._simulation_started_at)
         self._update_simulation_age()
-        self.left_panel.set_snapshot_id(self.current_snapshot_id)
         
         # Update application state (Standard Mode only)
         if self.current_mode == "standard" and trigger == "manual_lock":
@@ -1664,14 +1683,12 @@ class MainWindow(QMainWindow):
             run_duration_sec is not None
             and run_duration_sec > 1.5
             and self.system_mode == "LIVE"
-            and str(self.left_panel.auto_eval_combo.currentText()).upper() != "OFF"
+            and str(self._live_auto_eval_combo.currentText()).strip().upper() != "OFF"
         ):
             self.auto_evaluate_paused = True
             self.auto_timer.stop()
-            self.left_panel.set_auto_evaluate_paused(True)
 
         if trigger == "manual_lock":
-            self.left_panel.set_read_only(True)
             self.snapshot_active = True
             self._update_evaluate_button_text()
             self.status_strip.snapshot_label.setText(
@@ -1728,28 +1745,28 @@ class MainWindow(QMainWindow):
         self.status_strip.telemetry_label.setText("Telemetry: LIVE")
 
     def _on_telemetry_source_apply(self) -> None:
-        source, path = self.left_panel.get_telemetry_source()
-        self._start_telemetry(source=source, file_path=path if path else None)
+        source = self._live_telemetry_combo.currentData() or "mock"
+        path = self._live_telemetry_path.text().strip() or None
+        self._start_telemetry(source=str(source), file_path=path)
         self.status_strip.telemetry_label.setText(
             "Telemetry: LIVE (file)" if source == "file" and path else "Telemetry: LIVE"
         )
 
     def _update_simulation_age(self) -> None:
-        if self._last_eval_time is None:
-            self.left_panel.set_simulation_age(None)
-            return
-        self.left_panel.set_simulation_age(max(0.0, time.time() - self._last_eval_time))
+        pass  # No side panel to update
 
-    def _apply_live_telemetry_to_panel(self) -> None:
+    def _apply_live_telemetry_to_config(self) -> None:
+        """Push live telemetry into config_state for simulation."""
         data = self._last_telemetry or {}
         if not data:
             return
-        self.left_panel.uav_x.setValue(float(data.get("x", self.left_panel.uav_x.value())))
-        self.left_panel.uav_y.setValue(float(data.get("y", self.left_panel.uav_y.value())))
-        self.left_panel.uav_altitude.setValue(float(data.get("z", self.left_panel.uav_altitude.value())))
-        self.left_panel.uav_vx.setValue(float(data.get("vx", self.left_panel.uav_vx.value())))
-        self.left_panel.wind_x.setValue(float(data.get("wind_x", self.left_panel.wind_x.value())))
-        self.left_panel.wind_std.setValue(float(data.get("wind_std", self.left_panel.wind_std.value())))
+        with self.config_state.lock:
+            self.config_state.data["uav_x"] = float(data.get("x", self.config_state.data.get("uav_x", 0.0)))
+            self.config_state.data["uav_y"] = float(data.get("y", self.config_state.data.get("uav_y", 0.0)))
+            self.config_state.data["uav_altitude"] = float(data.get("z", self.config_state.data.get("uav_altitude", 100.0)))
+            self.config_state.data["uav_vx"] = float(data.get("vx", self.config_state.data.get("uav_vx", 20.0)))
+            self.config_state.data["wind_x"] = float(data.get("wind_x", self.config_state.data.get("wind_x", 2.0)))
+            self.config_state.data["wind_std"] = float(data.get("wind_std", self.config_state.data.get("wind_std", 0.8)))
 
     def _seed_config_state(self) -> None:
         """Seed config_state with defaults from mission_configs. Called once at init."""
@@ -1766,6 +1783,7 @@ class MainWindow(QMainWindow):
                 "uav_vy": float(cfg.uav_vel[1]) if len(cfg.uav_vel) > 1 else 0.0,
                 "target_x": float(cfg.target_pos[0]),
                 "target_y": float(cfg.target_pos[1]),
+                "target_elevation": float(cfg.target_pos[2]) if len(cfg.target_pos) >= 3 else 0.0,
                 "target_radius": float(cfg.target_radius),
                 "wind_x": float(cfg.wind_mean[0]),
                 "wind_std": float(cfg.wind_std),
@@ -1821,7 +1839,7 @@ class MainWindow(QMainWindow):
         p_hit = float(data.get("P_hit", 0.0) or 0.0)
         cep50 = float(data.get("cep50", 0.0) or 0.0)
         decision = str(data.get("decision", "NO DROP"))
-        n_samples = int(data.get("n_samples", 300))
+        n_samples = int(data.get("n_samples", 1000))
         threshold = float(data.get("threshold_pct", 75.0))
 
         snapshot = {
@@ -1888,12 +1906,11 @@ class MainWindow(QMainWindow):
         with self.telemetry_state.lock:
             self.telemetry_state.data = dict(self._last_telemetry)
         if self.system_mode == "LIVE":
-            self._apply_live_telemetry_to_panel()
+            self._apply_live_telemetry_to_config()
             self._push_config_to_worker()
         packet_rate = float(data.get("packet_rate_hz", 2.0))
         age_s = float(data.get("age_s", 0.5))
         status = str(data.get("status", "LIVE"))
-        self.left_panel.set_telemetry_health(packet_rate, age_s, status)
         self._update_simulation_age()
         if self.main_tabs.currentIndex() == self.main_tabs.indexOf(self.telemetry_tab):
             self._render_sensor_tab()

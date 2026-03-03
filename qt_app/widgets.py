@@ -28,41 +28,6 @@ class NoWheelSlider(QSlider):
         event.ignore()
 
 
-class LeftPanelPlaceholder(QFrame):
-    """Mission configuration panel placeholder."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("leftPanel")
-        self.setFixedWidth(300)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-
-        title = QLabel("MISSION CONFIGURATION", self)
-        title.setObjectName("panelTitle")
-        layout.addWidget(title)
-
-        subtitle = QLabel("Desktop configuration panel", self)
-        subtitle.setObjectName("panelSubtitle")
-        layout.addWidget(subtitle)
-
-        for text in (
-            "Payload",
-            "UAV State",
-            "Target",
-            "Environment",
-            "Simulation",
-            "Decision Threshold",
-        ):
-            label = QLabel(f"- {text}", self)
-            label.setObjectName("placeholderLine")
-            layout.addWidget(label)
-
-        layout.addStretch(1)
-
-
 class PlotAreaPlaceholder(QFrame):
     """Center plot area placeholder (FigureCanvasQTAgg will go here later)."""
 

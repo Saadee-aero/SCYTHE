@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import numpy as np
 from datetime import datetime
 from typing import Any, Dict
 
@@ -11,6 +12,58 @@ from typing import Any, Dict
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+
+def _compute_prob_curves(
+    snapshot: Dict[str, Any],
+    n_points: int = 8,
+) -> tuple[tuple[list, list], tuple[list, list]]:
+    """
+    Compute P(hit) vs target_radius and P(hit) vs target offset (wind-uncertainty proxy).
+    Uses snapshot impact_points only. No Monte Carlo or propagation.
+    Returns ((x_dist, y_dist), (x_wind, y_wind)).
+    """
+    impact_points = np.asarray(snapshot["impact_points"], dtype=float)
+    target = np.asarray(snapshot["target_position"], dtype=float).flatten()[:2]
+    base_radius = float(snapshot["target_radius"])
+
+    if impact_points.size == 0 or impact_points.ndim != 2 or impact_points.shape[1] < 2:
+        r_min, r_max = 1.0, max(15.0, base_radius * 2)
+        radii = np.linspace(r_min, r_max, n_points)
+        x_dist = radii.tolist()
+        y_dist = [0.0] * n_points
+        x_wind = np.linspace(0.2, 2.5, n_points).tolist()
+        y_wind = [0.0] * n_points
+        return ((x_dist, y_dist), (x_wind, y_wind))
+
+    impacts_2d = impact_points[:, :2]
+    distances_to_target = np.linalg.norm(impacts_2d - target, axis=1)
+
+    # Curve 1: P(hit) vs target radius — vary radius, same impacts
+    r_min, r_max = 1.0, max(15.0, base_radius * 2)
+    radii = np.linspace(r_min, r_max, n_points)
+    hit_matrix = distances_to_target[:, None] <= radii[None, :]
+    p_curve_radius = np.mean(hit_matrix, axis=0)
+    x_dist = radii.tolist()
+    y_dist = p_curve_radius.tolist()
+
+    # Curve 2: P(hit) vs wind_std (approximate via target shift proxy)
+    # Map wind_std to effective displacement: shift = (ws - base_ws) * 3
+    base_wind_std = float(
+        snapshot.get("telemetry", {}).get("wind_std", 1.0)
+    )
+    x_wind = np.linspace(0.2, 2.5, n_points)
+    shifts = (x_wind - base_wind_std) * 3.0
+    shifted_targets = target[None, :] + np.stack([shifts, np.zeros_like(shifts)], axis=1)
+    dists = np.linalg.norm(
+        impacts_2d[None, :, :] - shifted_targets[:, None, :],
+        axis=2,
+    )
+    p_curve_shift = np.mean(dists <= base_radius, axis=1)
+    x_wind = x_wind.tolist()
+    y_wind = p_curve_shift.tolist()
+
+    return ((x_dist, y_dist), (x_wind, y_wind))
 
 
 def run_simulation_snapshot(
@@ -30,6 +83,7 @@ def run_simulation_snapshot(
     from product.missions.mission_state import MissionState
     from product.guidance.advisory_layer import (
         evaluate_advisory,
+        enrich_snapshot_with_opportunity_explorer,
         get_impact_points_and_metrics,
     )
 
@@ -61,6 +115,7 @@ def run_simulation_snapshot(
     target_pos = (
         float(overrides.get("target_x", cfg.target_pos[0])),
         float(overrides.get("target_y", cfg.target_pos[1])),
+        float(overrides.get("target_elevation", cfg.target_pos[2] if len(cfg.target_pos) >= 3 else 0.0)),
     )
     target_radius = float(overrides.get("target_radius", cfg.target_radius))
     wind_mean = (
@@ -69,8 +124,9 @@ def run_simulation_snapshot(
         float(cfg.wind_mean[2] if len(cfg.wind_mean) > 2 else 0.0),
     )
     wind_std = float(overrides.get("wind_std", cfg.wind_std))
-    n_samples = int(overrides.get("n_samples", cfg.n_samples))
-    random_seed = int(overrides.get("random_seed", cfg.RANDOM_SEED))
+    overrides.setdefault("n_samples", cfg.n_samples)
+    _raw_seed = overrides.get("random_seed", cfg.RANDOM_SEED)
+    random_seed = 42 if _raw_seed is None else int(_raw_seed)
     threshold_pct = float(overrides.get("threshold_pct", cfg.THRESHOLD_SLIDER_INIT))
 
     payload = Payload(
@@ -88,23 +144,23 @@ def run_simulation_snapshot(
         uav_velocity=uav_vel,
     )
 
-    saved_n_samples = cfg.n_samples
-    cfg.n_samples = n_samples
     mc_call_counter[0] += 1
-    try:
-        impact_points, P_hit, cep50, impact_velocity_stats = get_impact_points_and_metrics(
-            mission_state, random_seed, caller=caller, mode=mode
-        )
-    finally:
-        cfg.n_samples = saved_n_samples
+    impact_points, P_hit, cep50, impact_velocity_stats = get_impact_points_and_metrics(
+        mission_state, random_seed, overrides, caller=caller, mode=mode
+    )
 
     advisory_result = None
     if include_advisory:
-        print(f"[ADVISORY TRACE] EXECUTING SWEEP in mode={mode}")
+        base_snapshot = {
+            "impact_points": impact_points,
+            "P_hit": P_hit,
+            "cep50": cep50,
+            "target_position": mission_state.target.position,
+            "target_radius": mission_state.target.radius,
+        }
         advisory_result = evaluate_advisory(
-            mission_state,
+            base_snapshot,
             threshold_pct / 100.0,
-            random_seed=random_seed,
             trace_mode=mode,
         )
 
@@ -122,7 +178,7 @@ def run_simulation_snapshot(
     import numpy as np
     impact_arr = np.asarray(impact_points, dtype=float)
     if impact_arr.size > 0 and impact_arr.ndim == 2 and impact_arr.shape[1] >= 2:
-        target_2d = np.asarray(mission_state.target.position, dtype=float).reshape(2)
+        target_2d = np.asarray(mission_state.target.position, dtype=float).flatten()[:2]
         radial_distances = np.linalg.norm(impact_arr[:, :2] - target_2d, axis=1)
         hits = int(np.sum(radial_distances <= mission_state.target.radius))
         n_actual = int(impact_arr.shape[0])
@@ -181,6 +237,18 @@ def run_simulation_snapshot(
         "doctrine_description": doctrine_result.get("doctrine_description") or DOCTRINE_DESCRIPTIONS.get(doctrine, doctrine),
     }
 
+    payload_config = {"mass": mass, "cd": cd, "area": area}
+    enrich_snapshot_with_opportunity_explorer(
+        result,
+        uav_pos,
+        uav_vel,
+        payload_config,
+        wind_mean,
+        shear=None,
+        target_position=mission_state.target.position,
+        target_radius=mission_state.target.radius,
+    )
+
     # AX-SENSITIVITY-HYBRID-09: optional sensitivity computation
     simulation_fidelity = str(overrides.get("simulation_fidelity", "")).strip().lower()
     if simulation_fidelity in ("standard", "advanced"):
@@ -224,16 +292,44 @@ def run_simulation_snapshot(
         except Exception:
             pass  # Non-fatal; snapshot remains valid
 
-    # AX-UNCERTAINTY-DECOMPOSITION-21: contribution weights (requires sensitivity_matrix)
+    # AX-UNCERTAINTY-DECOMPOSITION-21 / Phase 2: true conditional MC variance decomposition
     if simulation_fidelity == "advanced":
         try:
-            from src.uncertainty_decomposition import compute_uncertainty_contribution
+            from product.analysis.variance_decomposition import compute_uncertainty_contributions
 
-            compute_uncertainty_contribution(result)
+            uc = compute_uncertainty_contributions(
+                result, overrides, N=500, mc_call_counter=mc_call_counter,
+            )
+            if uc is not None:
+                result["uncertainty_contribution"] = uc
         except Exception:
             pass  # Non-fatal; snapshot remains valid
+
+    # Prob curves for Analysis tab graphs
+    if simulation_fidelity in ("standard", "advanced") and is_outer:
+        try:
+            (result["prob_vs_distance"], result["prob_vs_wind_uncertainty"]) = _compute_prob_curves(
+                result, n_points=8
+            )
+        except Exception:
+            result.setdefault("prob_vs_distance", None)
+            result.setdefault("prob_vs_wind_uncertainty", None)
 
     if is_outer:
         print(f"[MC SUMMARY] total_calls_this_cycle={mc_call_counter[0]}")
 
+    # EVALUATION snapshot invariant: required statistical fields must be present
+    _required = ("n_samples", "P_hit", "ci_low", "ci_high", "threshold_pct", "decision")
+    for key in _required:
+        if key not in result:
+            raise ValueError(f"Evaluation snapshot missing required field: {key!r}")
+    if not isinstance(result["n_samples"], int):
+        raise ValueError("Evaluation snapshot n_samples must be int")
+    if not isinstance(result["P_hit"], (int, float)):
+        raise ValueError("Evaluation snapshot P_hit must be float")
+    if not isinstance(result["ci_low"], (int, float)):
+        raise ValueError("Evaluation snapshot ci_low must be float")
+    if not isinstance(result["ci_high"], (int, float)):
+        raise ValueError("Evaluation snapshot ci_high must be float")
+    print("[SNAPSHOT] Evaluation snapshot validated")
     return result

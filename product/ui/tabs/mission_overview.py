@@ -330,7 +330,7 @@ def _draw_target_view(
     dispersion_mode="standard",
     view_zoom=1.0,
 ):
-    target_position = np.asarray(target_position, dtype=float).reshape(2)
+    target_position = np.asarray(target_position, dtype=float).flatten()[:2]
     impact_points = np.asarray(impact_points, dtype=float)
     if impact_points.size == 0:
         impact_points = np.empty((0, 2), dtype=float)

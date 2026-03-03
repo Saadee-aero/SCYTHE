@@ -52,10 +52,18 @@ def run_simulation(payload_config=None):
 
     mission_state = _build_mission_state(payload_config)
     impact_points, P_hit, cep50, impact_velocity_stats = get_impact_points_and_metrics(
-        mission_state, cfg.RANDOM_SEED
+        mission_state, cfg.RANDOM_SEED, {"n_samples": cfg.n_samples}
     )
+    base_snapshot = {
+        "impact_points": impact_points,
+        "P_hit": P_hit,
+        "cep50": cep50,
+        "target_position": mission_state.target.position,
+        "target_radius": mission_state.target.radius,
+    }
     advisory_result = evaluate_advisory(
-        mission_state, "Balanced", random_seed=cfg.RANDOM_SEED
+        base_snapshot,
+        "Balanced",
     )
 
     m = mission_state.payload.mass

@@ -85,4 +85,14 @@ def compute_topology(snapshot: dict[str, Any], mode: str) -> None:
             "eccentricity_ratio": eccentricity_ratio,
             "dispersion_classification": classification,
         }
+        # Also set topology_live for Control Center Current Factors display
+        mean_x, mean_y = float(mean_vec[0]), float(mean_vec[1])
+        drift_axis = _classify_drift_axis(mean_x, mean_y)
+        snapshot["topology_live"] = {
+            "mean_x": mean_x,
+            "mean_y": mean_y,
+            "var_x": float(np.var(pts[:, 0])),
+            "var_y": float(np.var(pts[:, 1])),
+            "drift_axis": drift_axis,
+        }
         return

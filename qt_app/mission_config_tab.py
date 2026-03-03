@@ -346,10 +346,12 @@ class MissionConfigTab(QWidget):
         payload_panel = self._build_payload_panel()
         eval_panel = self._build_eval_panel()
         policy_panel = self._build_policy_panel()
+        adv_sim_panel = self._build_advanced_simulation_panel()
 
         panels_layout.addWidget(payload_panel, 1)
         panels_layout.addWidget(eval_panel, 1)
         panels_layout.addWidget(policy_panel, 1)
+        panels_layout.addWidget(adv_sim_panel, 1)
 
         def _equalize_heights() -> None:
             panels_widget.adjustSize()
@@ -357,11 +359,13 @@ class MissionConfigTab(QWidget):
                 payload_panel.sizeHint().height(),
                 eval_panel.sizeHint().height(),
                 policy_panel.sizeHint().height(),
+                adv_sim_panel.sizeHint().height(),
             )
             if h > 0:
                 payload_panel.setMinimumHeight(h)
                 eval_panel.setMinimumHeight(h)
                 policy_panel.setMinimumHeight(h)
+                adv_sim_panel.setMinimumHeight(h)
 
         QTimer.singleShot(50, _equalize_heights)
 
@@ -535,6 +539,74 @@ class MissionConfigTab(QWidget):
         self._policy_panel = panel
         return panel
 
+    def _build_advanced_simulation_panel(self) -> ConfigPanel:
+        """Advanced Simulation section: 3D spatial overrides. Disabled in LIVE mode."""
+        panel = ConfigPanel("Advanced Simulation", self)
+        caption = QLabel("Simulation Override — Ignored in Live Mode")
+        caption.setStyleSheet(f"color: {SECONDARY_COLOR}; font-size: 10px;")
+        caption.setWordWrap(True)
+        panel.content_layout.addWidget(caption)
+
+        form = QFormLayout()
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self._uav_altitude_spin = NoWheelDoubleSpinBox(panel)
+        self._uav_altitude_spin.setRange(10.0, 100_000.0)
+        self._uav_altitude_spin.setSingleStep(10.0)
+        self._uav_altitude_spin.setDecimals(2)
+        self._uav_altitude_spin.setValue(100.0)
+        self._uav_altitude_spin.valueChanged.connect(lambda _: (self._set_dirty(True), self._update_panel_summaries()))
+        self._uav_altitude_spin.setStyleSheet(INPUT_STYLE)
+        lbl_alt = QLabel("UAV Altitude (m)")
+        lbl_alt.setStyleSheet(f"color: {PRIMARY_COLOR};")
+        form.addRow(lbl_alt, self._uav_altitude_spin)
+
+        self._target_x_spin = NoWheelDoubleSpinBox(panel)
+        self._target_x_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self._target_x_spin.setSingleStep(1.0)
+        self._target_x_spin.setDecimals(2)
+        self._target_x_spin.setValue(72.0)
+        self._target_x_spin.valueChanged.connect(lambda _: (self._set_dirty(True), self._update_panel_summaries()))
+        self._target_x_spin.setStyleSheet(INPUT_STYLE)
+        lbl_tx = QLabel("Target X (m)")
+        lbl_tx.setStyleSheet(f"color: {PRIMARY_COLOR};")
+        form.addRow(lbl_tx, self._target_x_spin)
+
+        self._target_y_spin = NoWheelDoubleSpinBox(panel)
+        self._target_y_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self._target_y_spin.setSingleStep(1.0)
+        self._target_y_spin.setDecimals(2)
+        self._target_y_spin.setValue(0.0)
+        self._target_y_spin.valueChanged.connect(lambda _: (self._set_dirty(True), self._update_panel_summaries()))
+        self._target_y_spin.setStyleSheet(INPUT_STYLE)
+        lbl_ty = QLabel("Target Y (m)")
+        lbl_ty.setStyleSheet(f"color: {PRIMARY_COLOR};")
+        form.addRow(lbl_ty, self._target_y_spin)
+
+        self._target_elevation_spin = NoWheelDoubleSpinBox(panel)
+        self._target_elevation_spin.setRange(-10_000.0, 10_000.0)
+        self._target_elevation_spin.setSingleStep(1.0)
+        self._target_elevation_spin.setDecimals(1)
+        self._target_elevation_spin.setValue(0.0)
+        self._target_elevation_spin.valueChanged.connect(lambda _: (self._set_dirty(True), self._update_panel_summaries()))
+        self._target_elevation_spin.setStyleSheet(INPUT_STYLE)
+        lbl_te = QLabel("Target Elevation (m)")
+        lbl_te.setStyleSheet(f"color: {PRIMARY_COLOR};")
+        form.addRow(lbl_te, self._target_elevation_spin)
+
+        panel.content_layout.addLayout(form)
+        self._adv_sim_panel = panel
+        self._adv_sim_widgets = [
+            self._uav_altitude_spin,
+            self._target_x_spin,
+            self._target_y_spin,
+            self._target_elevation_spin,
+        ]
+        return panel
+
     def _update_panel_summaries(self) -> None:
         """Update dynamic summary labels on all panels."""
         if hasattr(self, "_payload_panel"):
@@ -551,6 +623,18 @@ class MissionConfigTab(QWidget):
             d = self._doctrine_combo.currentData() or self._doctrine
             desc = DOCTRINE_DESCRIPTIONS.get(str(d), "")
             self._policy_panel.summary_label.setText(desc[:60] + "…" if len(desc) > 60 else desc)
+        if hasattr(self, "_adv_sim_panel"):
+            self._adv_sim_panel.summary_label.setText(
+                f"H={self._uav_altitude_spin.value():.0f}m | T=({self._target_x_spin.value():.0f}, {self._target_y_spin.value():.0f}, {self._target_elevation_spin.value():.0f})m"
+            )
+
+    def apply_system_mode(self, mode: str) -> None:
+        """Enable/disable Advanced Simulation section. Disabled in LIVE (telemetry-driven)."""
+        mode = str(mode or "SNAPSHOT").strip().upper()
+        enabled = mode != "LIVE"
+        if hasattr(self, "_adv_sim_widgets"):
+            for w in self._adv_sim_widgets:
+                w.setEnabled(enabled)
 
     def _update_mode_strip_border(self) -> None:
         bc = "#2cff05" if self._mission_mode == "TACTICAL" else "#38e84a"
@@ -784,6 +868,10 @@ class MissionConfigTab(QWidget):
             "mass": self._mass_spin.value(),
             "cd": self._cd_spin.value(),
             "area": self._area_spin.value(),
+            "uav_altitude": float(self._uav_altitude_spin.value()),
+            "target_x": float(self._target_x_spin.value()),
+            "target_y": float(self._target_y_spin.value()),
+            "target_elevation": float(self._target_elevation_spin.value()),
         }
 
     def init_from_config(self, cfg: dict) -> None:
@@ -818,6 +906,27 @@ class MissionConfigTab(QWidget):
         self._area_spin.setValue(float(cfg.get("area", 0.01)))
         self._n_samples_spin.setValue(int(cfg.get("n_samples", 1000)))
         self._seed_spin.setValue(int(cfg.get("random_seed", 42)))
+        if hasattr(self, "_uav_altitude_spin"):
+            self._uav_altitude_spin.blockSignals(True)
+            self._target_x_spin.blockSignals(True)
+            self._target_y_spin.blockSignals(True)
+            self._target_elevation_spin.blockSignals(True)
+            self._uav_altitude_spin.setValue(float(cfg.get("uav_altitude", 100.0)))
+            self._target_x_spin.setValue(float(cfg.get("target_x", 72.0)))
+            self._target_y_spin.setValue(float(cfg.get("target_y", 0.0)))
+            tp = cfg.get("target_pos")
+            te = cfg.get("target_elevation")
+            if te is not None:
+                te_val = float(te)
+            elif isinstance(tp, (list, tuple)) and len(tp) >= 3:
+                te_val = float(tp[2])
+            else:
+                te_val = 0.0
+            self._target_elevation_spin.setValue(te_val)
+            self._uav_altitude_spin.blockSignals(False)
+            self._target_x_spin.blockSignals(False)
+            self._target_y_spin.blockSignals(False)
+            self._target_elevation_spin.blockSignals(False)
         self._mass_spin.blockSignals(False)
         self._cd_spin.blockSignals(False)
         self._area_spin.blockSignals(False)
