@@ -8,6 +8,7 @@ Single source of PropagationContext creation for deterministic and Monte Carlo p
 import numpy as np
 
 from product.physics.propagation_context import build_propagation_context
+from src.statistics import compute_wilson_ci
 
 EXPLORER_STATUS_DEFAULT = "NOT_INVOKED"
 EXPLORER_STATUS_FEASIBLE = "FEASIBLE_SHIFT_FOUND"
@@ -43,6 +44,136 @@ def _make_context(mass, Cd, area, wind_ref, shear, target_z, dt):
         target_z=float(target_z),
         dt=float(dt),
     )
+
+
+def _run_monte_carlo_adaptive(
+    context,
+    pos0,
+    vel0,
+    wind_std,
+    base_config,
+    random_seed,
+    target_pos,
+    target_radius,
+    *,
+    caller: str = "BASE",
+    mode: str = "advanced",
+):
+    """
+    Adaptive Monte Carlo controller that wraps the existing batch engine.
+
+    Calls the vectorized Monte Carlo propagation in batches, increasing the
+    total sample count until the Wilson binomial confidence interval width on
+    hit probability drops below a target width, or a maximum sample budget is
+    reached. The underlying RK2 propagation and impact data format are not
+    modified.
+    """
+    from src.monte_carlo import run_monte_carlo
+
+    target_xy = np.asarray(target_pos, dtype=float).flatten()[:2]
+    radius = float(target_radius)
+
+    # Adaptive sampling parameters (AIRDROP-X doctrine).
+    ci_width_target = 0.05
+    initial_batch = 200
+    batch_size = 100
+    min_samples = 300
+
+    # Respect configured n_samples but never exceed the global hard cap of 1000.
+    if isinstance(base_config, dict):
+        cfg_n = base_config.get("n_samples", 1000)
+    else:
+        cfg_n = getattr(base_config, "n_samples", 1000)
+    try:
+        cfg_n_int = int(cfg_n)
+    except (TypeError, ValueError):
+        cfg_n_int = 1000
+    max_samples = min(1000, cfg_n_int if cfg_n_int > 0 else 1000)
+
+    impact_batches: list[np.ndarray] = []
+    speed_batches: list[np.ndarray] = []
+    total_hits = 0
+    total_n = 0
+    batch_index = 0
+
+    adaptive_enabled = radius > 0.0
+
+    # Always take at least one batch, even if max_samples < initial_batch.
+    while total_n < max_samples:
+        remaining = max_samples - total_n
+        if remaining <= 0:
+            break
+
+        n_batch = initial_batch if total_n == 0 else batch_size
+        n_batch = min(n_batch, remaining)
+        if n_batch <= 0:
+            break
+
+        # Derive a deterministic per-batch seed from the base seed.
+        batch_seed = int(random_seed) + batch_index
+        batch_index += 1
+
+        # Copy base config and override n_samples for this batch only.
+        if isinstance(base_config, dict):
+            batch_config = dict(base_config)
+        else:
+            batch_config = {"n_samples": n_batch}
+        batch_config["n_samples"] = int(n_batch)
+
+        batch_impacts, batch_speeds = run_monte_carlo(
+            context,
+            pos0,
+            vel0,
+            wind_std,
+            batch_config,
+            batch_seed,
+            return_impact_speeds=True,
+            caller=caller,
+            mode=mode,
+        )
+
+        batch_impacts = np.asarray(batch_impacts, dtype=float).reshape(-1, 2)
+        batch_speeds = np.asarray(batch_speeds, dtype=float).reshape(-1)
+
+        impact_batches.append(batch_impacts)
+        speed_batches.append(batch_speeds)
+
+        # Incremental hit statistics and CI only when adaptive early stopping
+        # is meaningful (positive target radius). Otherwise, run full budget.
+        total_n += int(batch_impacts.shape[0])
+        if adaptive_enabled:
+            radial_distances = np.linalg.norm(batch_impacts - target_xy, axis=1)
+            hits_batch = int(np.sum(radial_distances <= radius))
+            total_hits += hits_batch
+
+            # Numerically stable CI evaluation near p ~ 0 or 1:
+            # clamp the empirical probability before mapping to an effective
+            # (possibly fractional) hit count for Wilson interval computation.
+            if total_n > 0:
+                p_raw = float(total_hits) / float(total_n)
+                eps = 1e-4
+                p_clamped = max(eps, min(1.0 - eps, p_raw))
+                k_effective = p_clamped * float(total_n)
+            else:
+                k_effective = 0.0
+            ci_low, ci_high = compute_wilson_ci(k_effective, total_n)
+            ci_width = ci_high - ci_low
+
+            if (total_n >= min_samples and ci_width < ci_width_target) or total_n >= max_samples:
+                break
+
+        if total_n >= max_samples:
+            break
+
+    if impact_batches:
+        impact_points = np.concatenate(impact_batches, axis=0)
+        impact_speeds = np.concatenate(speed_batches, axis=0)
+    else:
+        impact_points = np.empty((0, 2), dtype=float)
+        impact_speeds = np.empty((0,), dtype=float)
+
+    print(f"[MC ADAPTIVE] samples_used={int(impact_points.shape[0])}")
+    return impact_points, impact_speeds
 
 
 def get_impact_points_and_metrics(
@@ -83,14 +214,17 @@ def get_impact_points_and_metrics(
             target_z=target_z,
             dt=cfg.dt,
         )
-        impact_points, impact_speeds = monte_carlo.run_monte_carlo(
+        # Adaptive Monte Carlo controller: calls existing engine in batches
+        # until the hit-probability confidence interval stabilizes.
+        impact_points, impact_speeds = _run_monte_carlo_adaptive(
             context,
             cfg.uav_pos,
             cfg.uav_vel,
             cfg.wind_std,
             config,
             random_seed,
-            return_impact_speeds=True,
+            target_pos,
+            engine_inputs["target_radius"],
             caller=caller,
             mode=mode,
         )

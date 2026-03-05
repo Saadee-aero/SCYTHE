@@ -293,7 +293,8 @@ def run_simulation_snapshot(
             pass  # Non-fatal; snapshot remains valid
 
     # AX-UNCERTAINTY-DECOMPOSITION-21 / Phase 2: true conditional MC variance decomposition
-    if simulation_fidelity == "advanced":
+    run_variance_decomposition = overrides.get("analysis_mode", False)
+    if simulation_fidelity == "advanced" and run_variance_decomposition:
         try:
             from product.analysis.variance_decomposition import compute_uncertainty_contributions
 

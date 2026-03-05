@@ -50,7 +50,7 @@ def _impact_speed(trajectory, dt, pos0, vel0):
     return float(np.linalg.norm(vel0))
 
 
-def _compute_acceleration(pos, vel, context, wind_a=None):
+def _compute_acceleration(pos, vel, context, wind_a=None, cd_override=None):
     """
     Compute acceleration from context (density, wind, mass, Cd, area).
 
@@ -59,6 +59,7 @@ def _compute_acceleration(pos, vel, context, wind_a=None):
         vel: (M, 3) velocities
         context: PropagationContext with density, wind, mass, Cd, area
         wind_a: optional (M, 3) pre-resolved wind; if provided, skips context.wind()
+        cd_override: optional (M,) per-sample Cd; if provided, overrides context.Cd
 
     Returns:
         acc: (M, 3) acceleration vectors
@@ -79,9 +80,10 @@ def _compute_acceleration(pos, vel, context, wind_a=None):
         assert rho.shape[0] == len(z)
     v_rel = vel - wind
     v_rel_mag = np.linalg.norm(v_rel, axis=1)
+    Cd = cd_override[:, None] if cd_override is not None else context.Cd
     drag_force = np.where(
         v_rel_mag[:, None] > 0,
-        -0.5 * rho[:, None] * context.Cd * context.area * v_rel_mag[:, None] * v_rel,
+        -0.5 * rho[:, None] * Cd * context.area * v_rel_mag[:, None] * v_rel,
         0.0,
     )
     return _GRAVITY + drag_force / context.mass
@@ -99,6 +101,16 @@ def _propagate_payload_batch(
     wind_drift_amp=None,
     wind_drift_omega=0.0,
     wind_drift_phase=None,
+    *,
+    enable_gust_model: bool = False,
+    gust_theta: float = 1.5,
+    gust_sigma: float = 1.0,
+    gust_rng=None,
+    enable_rotation_dynamics: bool = False,
+    angular_rate_sigma: float = 0.5,
+    angular_damping: float = 0.3,
+    rotation_drag_factor: float = 0.4,
+    rotation_rng=None,
 ):
     """
     Batch vectorized propagation with RK2 (Heun) integration.
@@ -151,6 +163,33 @@ def _propagate_payload_batch(
 
     use_drift = wind_drift_amp is not None and wind_drift_phase is not None
 
+    use_gust = bool(enable_gust_model) and gust_rng is not None
+    if use_gust:
+        # Exact discrete-time OU parameters: interpret gust_sigma as the
+        # steady-state standard deviation (variance independent of dt).
+        alpha = float(np.exp(-gust_theta * dt))
+        sigma_step = float(gust_sigma * np.sqrt(max(0.0, 1.0 - alpha * alpha)))
+        # Weakly correlate horizontal components via fixed covariance.
+        C = np.array([[1.0, 0.3], [0.3, 1.0]], dtype=float)
+        L = np.linalg.cholesky(C)
+        # Initialize gust state from stationary distribution (equilibrium).
+        z0 = gust_rng.normal(0.0, 1.0, size=(N, 2))
+        gust_xy = (z0 @ L.T) * float(gust_sigma)
+    else:
+        gust_xy = None
+        alpha = 1.0
+        sigma_step = 0.0
+        L = None
+
+    use_rotation = bool(enable_rotation_dynamics) and rotation_rng is not None
+    if use_rotation:
+        theta = rotation_rng.uniform(0.0, 2.0 * np.pi, size=N)
+        omega = rotation_rng.normal(0.0, float(angular_rate_sigma), size=N)
+        ang_noise_scale = float(angular_rate_sigma) * np.sqrt(dt)
+    else:
+        theta = None
+        omega = None
+
     step = 0
     t_sim = 0.0
     active = pos[:, 2] > ground_z
@@ -166,8 +205,33 @@ def _propagate_payload_batch(
             )
             wind_1 = wind_1 + drift_1
 
+        if use_gust:
+            gust_active = gust_xy[active]
+            gust3 = np.zeros_like(wind_1)
+            gust3[:, 0] = gust_active[:, 0]
+            gust3[:, 1] = gust_active[:, 1]
+            wind_1 = wind_1 + gust3
+
+            # Evolve OU gust state once between RK2 stages so that the
+            # turbulence field advances in time between wind_1 and wind_2.
+            if np.any(active):
+                g_prev = gust_xy[active]
+                z = gust_rng.normal(0.0, 1.0, size=g_prev.shape)
+                noise = z @ L.T
+                g_next = alpha * g_prev + sigma_step * noise
+                gust_xy[active] = g_next
+
         # --- RK2 (Heun) ---
-        a1 = _compute_acceleration(p_a, v_a, context, wind_a=wind_1)
+        cd_override_a = None
+        if use_rotation:
+            theta_a = theta[active]
+            cd_override_a = context.Cd * (
+                1.0 + float(rotation_drag_factor) * np.abs(np.sin(theta_a))
+            )
+            cd_override_a = np.clip(
+                cd_override_a, 0.5 * context.Cd, 2.0 * context.Cd
+            )
+        a1 = _compute_acceleration(p_a, v_a, context, wind_a=wind_1, cd_override=cd_override_a)
 
         # Predictor: Euler step
         v_temp = v_a + a1 * dt
@@ -180,7 +244,14 @@ def _propagate_payload_batch(
             )
             wind_2 = wind_2 + drift_2
 
-        a2 = _compute_acceleration(p_temp, v_temp, context, wind_a=wind_2)
+        if use_gust:
+            gust_active = gust_xy[active]
+            gust3 = np.zeros_like(wind_2)
+            gust3[:, 0] = gust_active[:, 0]
+            gust3[:, 1] = gust_active[:, 1]
+            wind_2 = wind_2 + gust3
+
+        a2 = _compute_acceleration(p_temp, v_temp, context, wind_a=wind_2, cd_override=cd_override_a)
 
         # Corrector: average of both stages
         vel[active] = v_a + 0.5 * (a1 + a2) * dt
@@ -217,9 +288,21 @@ def _propagate_payload_batch(
         if return_impact_speeds:
             impact_speeds_out[just_hit] = np.linalg.norm(vel[just_hit], axis=1)
 
+        # Advance simulation time and update active mask for next RK2 step.
         active = active_new
+        if use_rotation and np.any(active):
+            theta[active] = theta[active] + omega[active] * dt
+            omega[active] = (
+                omega[active]
+                + (-float(angular_damping) * omega[active]) * dt
+                + ang_noise_scale * rotation_rng.normal(0.0, 1.0, size=np.sum(active))
+            )
         step += 1
         t_sim += dt
+        # After completing all physics for this RK2 step, clear gust state
+        # for trajectories that are no longer active to avoid stale reuse.
+        if use_gust:
+            gust_xy[~active] = 0.0
 
         if return_trajectories and step >= max_steps:
             remaining = active.copy()
@@ -382,11 +465,23 @@ def run_monte_carlo(
 
     mc_context = context.with_wind(wind_samples, wind_profiles, z_levels)
 
+    # --- Stochastic gust turbulence model (optional Ornstein–Uhlenbeck) ---
+    enable_gust_model = bool(config.get("enable_gust_model", False))
+    gust_theta = float(config.get("gust_theta", 1.5))
+    gust_sigma = float(config.get("gust_sigma", 1.0))
+
+    # --- Payload rotation dynamics (optional) ---
+    enable_rotation_dynamics = bool(config.get("enable_rotation_dynamics", False))
+    angular_rate_sigma = float(config.get("angular_rate_sigma", 0.5))
+    angular_damping = float(config.get("angular_damping", 0.3))
+    rotation_drag_factor = float(config.get("rotation_drag_factor", 0.4))
+
     # --- Propagation ---
     t0 = time.perf_counter()
     result = _propagate_payload_batch(
         mc_context,
-        pos0, vel0,
+        pos0,
+        vel0,
         return_trajectories=return_trajectories,
         return_impact_speeds=return_impact_speeds,
         use_precise_impact=use_precise_impact,
@@ -395,6 +490,15 @@ def run_monte_carlo(
         wind_drift_amp=wd_amp,
         wind_drift_omega=wd_omega,
         wind_drift_phase=wd_phase,
+        enable_gust_model=enable_gust_model,
+        gust_theta=gust_theta,
+        gust_sigma=gust_sigma,
+        gust_rng=rng,
+        enable_rotation_dynamics=enable_rotation_dynamics,
+        angular_rate_sigma=angular_rate_sigma,
+        angular_damping=angular_damping,
+        rotation_drag_factor=rotation_drag_factor,
+        rotation_rng=rng,
     )
     propagation_ms = (time.perf_counter() - t0) * 1000.0
 

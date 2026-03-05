@@ -1939,13 +1939,15 @@ class MainWindow(QMainWindow):
             if getattr(self, "_current_decision", "") == "PAUSED":
                 if event.type() == QEvent.Type.Enter:
                     current = self.paused_message_label.font()
-                    current.setPointSizeF(current.pointSizeF() + 1)
+                    new_size = max(8.0, current.pointSizeF() + 1.0)
+                    current.setPointSizeF(new_size)
                     self.paused_message_label.setFont(current)
                     self.paused_message_label.setStyleSheet("color: #f0f0f0; font-size: 12px; padding: 4px;")
                     return False
                 if event.type() == QEvent.Type.Leave:
                     current = self.paused_message_label.font()
-                    current.setPointSizeF(current.pointSizeF() - 1)
+                    new_size = max(8.0, current.pointSizeF() - 1.0)
+                    current.setPointSizeF(new_size)
                     self.paused_message_label.setFont(current)
                     self.paused_message_label.setStyleSheet("color: #d4a017; font-size: 11px; padding: 4px;")
                     return False

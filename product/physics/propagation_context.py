@@ -61,6 +61,7 @@ class _PropagationContext:
         wind_profiles=None,
         z_levels=None,
         _wind_fn=None,
+        _skip_validation: bool = False,
     ):
         # NOTE:
         # object.__setattr__ is used to bypass immutability guard during initialization.
@@ -78,6 +79,8 @@ class _PropagationContext:
         object.__setattr__(self, "z_levels", z_levels)
         object.__setattr__(self, "_wind_fn", _wind_fn)
         object.__setattr__(self, "_init_done", True)
+        if __debug__ and not _skip_validation:
+            self._validate_wind_equivalence()
 
     def __setattr__(self, name, value):
         if getattr(self, "_init_done", False):
@@ -102,6 +105,7 @@ class _PropagationContext:
             dt=self.dt,
             wind_profiles=wind_prof,
             z_levels=zl,
+            _skip_validation=True,
         )
 
     def subset(self, mask):
@@ -120,6 +124,7 @@ class _PropagationContext:
             dt=self.dt,
             wind_profiles=self.wind_profiles[mask] if self.wind_profiles is not None else None,
             z_levels=self.z_levels,
+            _skip_validation=True,
         )
 
     def _wind_impl(self, z, wind_ref_sub, wind_profiles_sub):
@@ -151,12 +156,35 @@ class _PropagationContext:
             w = self._wind_impl(z, w_ref_sub, prof_sub)
         w = np.asarray(w, dtype=float)
         assert w.shape == (z.shape[0], 3)
-        if __debug__ and self._wind_fn is None and self.wind_ref.shape[0] >= 3 and np.sum(mask) >= 1:
-            sub = self.subset(mask)
-            w_sub = sub.wind(z)
-            if not np.allclose(w, w_sub, rtol=0, atol=1e-12):
-                raise AssertionError("wind_for_mask must match subset(mask).wind(z)")
         return w
+
+    def _validate_wind_equivalence(self):
+        """
+        Internal debug-only check that wind_for_mask and subset(mask).wind
+        remain mathematically identical. Runs once at context construction.
+        """
+        if self._wind_fn is not None:
+            return
+        wind_ref = np.asarray(self.wind_ref, dtype=float)
+        N = wind_ref.shape[0]
+        if N < 3:
+            return
+        # Small random sample in altitude and mask space
+        rng = np.random.default_rng()
+        # Altitudes between ground and a modest ceiling above target_z
+        z_max = float(self.target_z) if float(self.target_z) > 0.0 else 100.0
+        z_sample = rng.uniform(0.0, z_max, size=3)
+        z_sample = np.atleast_1d(np.asarray(z_sample, dtype=float))
+        # Random mask with at least one active sample
+        mask = np.zeros(N, dtype=bool)
+        k = min(5, N)
+        idx = rng.choice(N, size=k, replace=False)
+        mask[idx] = True
+        w_mask = self.wind_for_mask(z_sample, mask)
+        sub = self.subset(mask)
+        w_sub = sub.wind(z_sample)
+        if not np.allclose(w_mask, w_sub, rtol=0, atol=1e-12):
+            raise AssertionError("wind_for_mask must match subset(mask).wind(z)")
 
     def with_wind_fn(self, fn):
         """Return a context that uses fn(z) for wind instead of default model."""
@@ -167,6 +195,7 @@ class _PropagationContext:
             wind_profiles=self.wind_profiles,
             z_levels=self.z_levels,
             _wind_fn=fn,
+            _skip_validation=True,
         )
 
     def wind(self, z):
