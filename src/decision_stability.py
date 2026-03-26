@@ -4,6 +4,10 @@ AX-DECISION-STABILITY-01.
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 HYSTERESIS_MARGIN_PCT = 1.0
 EPSILON = 1e-6  # AX-STABILITY-CLAMP-02: min ci_width for stability_index
 
@@ -84,7 +88,7 @@ def enrich_evaluation_snapshot(
     if raw not in ("DROP", "NO DROP"):
         raw = "DROP" if (p_hit * 100.0) >= th else "NO DROP"
 
-    print("PREVIOUS DECISION USED:", previous_decision)  # AX-HYSTERESIS-ERROR-TRANSITION-VERIFY-05
+    logger.debug("Hysteresis applied: previous_decision=%s", previous_decision)
     final = apply_decision_hysteresis(raw, p_hit, th, previous_decision)
     snapshot["decision"] = final
 

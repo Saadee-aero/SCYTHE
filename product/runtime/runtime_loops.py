@@ -7,6 +7,10 @@ shared `SystemState` to connect telemetry, planner, guidance, and UI.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import sys
 from pathlib import Path
 
@@ -23,6 +27,7 @@ from typing import Optional
 import numpy as np
 
 from product.aircraft import VehicleState
+from product.aircraft.motion_predictor import MotionPredictor
 from product.explorer import compute_release_envelope
 from product.guidance.corridor_guidance import compute_corridor_guidance
 from product.physics.propagation_context import build_propagation_context
@@ -75,6 +80,7 @@ class TelemetryLoop(_BaseLoop):
     def __init__(self, system_state: SystemState, update_rate_hz: float = 50.0):
         super().__init__(system_state, update_rate_hz, name="TelemetryLoop")
         self._t = 0.0
+        self._last_planned_position: Optional[np.ndarray] = None
 
     def tick(self) -> None:
         dt = self._period
@@ -117,6 +123,14 @@ class TelemetryLoop(_BaseLoop):
                 acceleration=acc,
                 timestamp=self._t,
             )
+            # Mark envelope dirty if UAV has moved more than 2.0 meters.
+            if self._last_planned_position is not None:
+                distance = float(np.linalg.norm(pos[:2] - self._last_planned_position[:2]))
+                if distance > 2.0:
+                    self._state.envelope_dirty = True
+                    self._last_planned_position = pos.copy()
+            elif self._last_planned_position is None:
+                self._last_planned_position = pos.copy()
 
 
 class GuidanceLoop(_BaseLoop):
@@ -134,12 +148,15 @@ class GuidanceLoop(_BaseLoop):
 
         # Threshold can be overridden via settings, default 0.5.
         threshold = float(self._state.settings.get("drop_probability_threshold", 0.5))
-        # TODO: integrate MotionPredictor here.
-        # Future versions should use predicted UAV state instead of raw telemetry.
+        
+        # Predict UAV state 500ms ahead for better guidance accuracy.
+        predictor = MotionPredictor(vs)
+        pos_pred, vel_pred = predictor.predict_state(vs.timestamp + 0.5)
+        
         gr = compute_corridor_guidance(
             envelope_result=envelope,
-            pos_uav=vs.position,
-            vel_uav=vs.velocity,
+            pos_uav=pos_pred,
+            vel_uav=vel_pred,
             current_time=vs.timestamp,
             threshold=threshold,
         )
@@ -157,21 +174,6 @@ class BackgroundPlannerLoop(_BaseLoop):
 
     def __init__(self, system_state: SystemState, update_rate_hz: float = 1.0):
         super().__init__(system_state, update_rate_hz, name="BackgroundPlannerLoop")
-        # Simple physics defaults; real system would source these from config.
-        mass = 1.0
-        Cd = 1.0
-        area = 0.01
-        wind_mean = np.array([2.0, 0.0, 0.0])
-        dt = 0.05
-        self._context = build_propagation_context(
-            mass=mass,
-            Cd=Cd,
-            area=area,
-            wind_ref=wind_mean.reshape(3),
-            shear=None,
-            target_z=0.0,
-            dt=dt,
-        )
 
         # Minimal config-like object with required attributes.
         # Use coarse grid for real-time (~15s per envelope):
@@ -213,11 +215,27 @@ class BackgroundPlannerLoop(_BaseLoop):
 
         self._busy = True
         try:
+            # Read physics values from settings with fallbacks
+            settings = self._state.settings
+            mass = float(settings.get("mass", 1.0))
+            Cd = float(settings.get("Cd", 1.0))
+            area = float(settings.get("area", 0.01))
+            wind_mean = np.array(settings.get("wind_mean", [2.0, 0.0, 0.0]), dtype=float)
+            dt = 0.05
+            context = build_propagation_context(
+                mass=mass,
+                Cd=Cd,
+                area=area,
+                wind_ref=wind_mean.reshape(3),
+                shear=None,
+                target_z=0.0,
+                dt=dt,
+            )
             target_pos = np.asarray(target, dtype=float).reshape(-1)
-            print("[Planner] Computing release envelope...")
+            logger.debug("BackgroundPlannerLoop: computing release envelope")
             with _suppress_timing():
                 env = compute_release_envelope(
-                    self._context,
+                    context,
                     self._config,
                     vs.position,
                     vs.velocity,
@@ -226,7 +244,7 @@ class BackgroundPlannerLoop(_BaseLoop):
             with self._state.lock:
                 self._state.envelope_result = env
                 self._state.envelope_dirty = False
-            print("[Planner] Envelope ready")
+            logger.debug("BackgroundPlannerLoop: envelope ready")
         finally:
             self._busy = False
 
