@@ -24,7 +24,8 @@
       "Bash(python -m py_compile e:/AIRDROP-X/product/uncertainty/unscented_state_model.py)",
       "Bash(python -m py_compile e:/AIRDROP-X/product/runtime/runtime_loops.py)",
       "Bash(python -m py_compile e:/AIRDROP-X/product/sensors/camera_feed.py)",
-      "Bash(python -m py_compile product/runtime/system_state.py)"
+      "Bash(python -m py_compile product/runtime/system_state.py)",
+      "Bash(python -m py_compile product/sensors/camera_feed.py)"
     ]
   }
 }

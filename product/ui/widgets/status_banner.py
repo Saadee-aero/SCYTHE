@@ -1,7 +1,26 @@
 from enum import IntEnum
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QPainter, QBrush, QColor
-from PySide6.QtWidgets import QWidget, QLabel
+from PySide6.QtCore import Qt, Signal, QTimer, QRect
+from PySide6.QtGui import QPainter, QBrush, QColor, QFont, QFontDatabase, QPen
+from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QVBoxLayout
+
+
+def _select_monospace_family() -> str:
+    families = set(QFontDatabase.families())
+    if "Consolas" in families:
+        return "Consolas"
+    if "Courier New" in families:
+        return "Courier New"
+    return "Courier"
+
+
+_MONO_FAMILY = None
+
+
+def _mono_family() -> str:
+    global _MONO_FAMILY
+    if _MONO_FAMILY is None:
+        _MONO_FAMILY = _select_monospace_family()
+    return _MONO_FAMILY
 
 
 class DropStatus(IntEnum):
@@ -145,3 +164,176 @@ class StatusBannerWidget(QWidget):
         painter.setBrush(QBrush(self._bg_color))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(self.rect(), 6, 6)
+
+
+_STATUS_COLOR = {
+    DropStatus.NO_DROP: "#CC2200",
+    DropStatus.APPROACH_CORRIDOR: "#FF8C00",
+    DropStatus.IN_DROP_ZONE: "#00AA44",
+    DropStatus.DROP_NOW: "#00FF66",
+}
+
+_CENTER_TINT = {
+    DropStatus.NO_DROP: "#1a0000",
+    DropStatus.APPROACH_CORRIDOR: "#1a0e00",
+    DropStatus.IN_DROP_ZONE: "#001a08",
+    DropStatus.DROP_NOW: "#002200",
+}
+
+_STATUS_TEXT = {
+    DropStatus.NO_DROP: "NO DROP",
+    DropStatus.APPROACH_CORRIDOR: "APPROACH CORRIDOR",
+    DropStatus.IN_DROP_ZONE: "IN DROP ZONE",
+    DropStatus.DROP_NOW: "DROP NOW",
+}
+
+_ADVISORY_TEXT = {
+    (DropStatus.NO_DROP, DropReason.MISSION_PARAMS_NOT_SET):
+        ("Mission parameters not set — click to configure", "#FFDD00"),
+    (DropStatus.NO_DROP, DropReason.UAV_TOO_FAR):
+        ("Outside drop corridor — adjust heading", "white"),
+    (DropStatus.NO_DROP, DropReason.WIND_EXCEEDED):
+        ("Wind envelope exceeded — hold position", "white"),
+    (DropStatus.NO_DROP, DropReason.NONE): ("", "white"),
+    (DropStatus.APPROACH_CORRIDOR, DropReason.NONE):
+        ("Intercept heading — maintain altitude", "white"),
+    (DropStatus.IN_DROP_ZONE, DropReason.NONE):
+        ("Confirm release conditions", "white"),
+    (DropStatus.DROP_NOW, DropReason.NONE):
+        ("Release payload immediately", "white"),
+}
+
+
+class MissionStatusStrip(QWidget):
+    """Persistent mission status strip — paintEvent-rendered GCS header.
+
+    Military GCS reference: Apache IHADSS annunciator bar + QGroundControl
+    status header. Three panels: LEFT guidance (HDG/DIST), CENTER status +
+    advisory, RIGHT probability (P(HIT)/CEP50). Fixed 72 px; bottom border
+    accent colored by DropStatus (static, not animated).
+    """
+
+    navigate_to_tab = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(72)
+
+        self._status = DropStatus.NO_DROP
+        self._reason = DropReason.MISSION_PARAMS_NOT_SET
+        self._hdg_deg = None
+        self._dist_m = None
+        self._p_hit = None
+        self._cep_m = None
+
+        family = _mono_family()
+        self._font_primary = QFont(family, 18, QFont.Bold)
+        self._font_advisory = QFont(family, 10)
+        self._font_value = QFont(family, 11)
+        self._font_sub = QFont(family, 9)
+
+    def update_status(self, status: DropStatus, reason: DropReason = DropReason.NONE):
+        if self._status == status and self._reason == reason:
+            return
+        self._status = status
+        self._reason = reason
+        self.update()
+
+    def update_guidance(self, heading_deg, dist_m, p_hit, cep_m):
+        self._hdg_deg = heading_deg
+        self._dist_m = dist_m
+        self._p_hit = p_hit
+        self._cep_m = cep_m
+        self.update()
+
+    @staticmethod
+    def _fmt_hdg(v):
+        return f"HDG: {v:.0f}\u00b0" if v is not None else "HDG: ---\u00b0"
+
+    @staticmethod
+    def _fmt_dist(v):
+        return f"DIST: {v:.0f} m" if v is not None else "DIST: --- m"
+
+    @staticmethod
+    def _fmt_phit(v):
+        return f"P(HIT): {v:.2f}" if v is not None else "P(HIT): ---"
+
+    @staticmethod
+    def _fmt_cep(v):
+        if v is None or v > 999.9:
+            return "CEP\u2085\u2080: --- m"
+        return f"CEP\u2085\u2080: {v:.1f} m"
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+
+        w = self.width()
+        h = self.height()
+        left_w = int(w * 0.25)
+        right_w = int(w * 0.25)
+        center_w = w - left_w - right_w
+
+        left_rect = QRect(0, 0, left_w, h)
+        center_rect = QRect(left_w, 0, center_w, h)
+        right_rect = QRect(left_w + center_w, 0, right_w, h)
+
+        status_color_str = _STATUS_COLOR.get(self._status, "#CC2200")
+        status_qcolor = QColor(status_color_str)
+        center_tint = QColor(_CENTER_TINT.get(self._status, "#1a0000"))
+        bg = QColor("#0a0a0a")
+
+        # Panel backgrounds.
+        painter.fillRect(left_rect, bg)
+        painter.fillRect(center_rect, center_tint)
+        painter.fillRect(right_rect, bg)
+
+        pad = 12
+
+        # LEFT: HDG / DIST, left-aligned, stacked.
+        painter.setPen(QColor("white"))
+        painter.setFont(self._font_value)
+        hdg_rect = QRect(left_rect.x() + pad, 10, left_rect.width() - pad, 24)
+        painter.drawText(hdg_rect, Qt.AlignLeft | Qt.AlignVCenter, self._fmt_hdg(self._hdg_deg))
+        painter.setFont(self._font_sub)
+        dist_rect = QRect(left_rect.x() + pad, 38, left_rect.width() - pad, 22)
+        painter.drawText(dist_rect, Qt.AlignLeft | Qt.AlignVCenter, self._fmt_dist(self._dist_m))
+
+        # CENTER: primary status + advisory, center-aligned.
+        primary_text = _STATUS_TEXT.get(self._status, "UNKNOWN")
+        painter.setPen(status_qcolor)
+        painter.setFont(self._font_primary)
+        primary_rect = QRect(center_rect.x(), 6, center_rect.width(), 34)
+        painter.drawText(primary_rect, Qt.AlignCenter, primary_text)
+
+        advisory, advisory_color_str = _ADVISORY_TEXT.get(
+            (self._status, self._reason),
+            _ADVISORY_TEXT.get((self._status, DropReason.NONE), ("", "white")),
+        )
+        painter.setPen(QColor(advisory_color_str))
+        painter.setFont(self._font_advisory)
+        advisory_rect = QRect(center_rect.x(), 40, center_rect.width(), 26)
+        painter.drawText(advisory_rect, Qt.AlignCenter, advisory)
+
+        # RIGHT: P(HIT) / CEP, right-aligned.
+        painter.setPen(QColor("white"))
+        painter.setFont(self._font_value)
+        phit_rect = QRect(right_rect.x(), 10, right_rect.width() - pad, 24)
+        painter.drawText(phit_rect, Qt.AlignRight | Qt.AlignVCenter, self._fmt_phit(self._p_hit))
+        painter.setFont(self._font_sub)
+        cep_rect = QRect(right_rect.x(), 38, right_rect.width() - pad, 22)
+        painter.drawText(cep_rect, Qt.AlignRight | Qt.AlignVCenter, self._fmt_cep(self._cep_m))
+
+        # Bottom border accent — 2 px, status-colored, static.
+        pen = QPen(status_qcolor)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(0, h - 1, w, h - 1)
+
+    def mousePressEvent(self, event):
+        if (
+            self._status == DropStatus.NO_DROP
+            and self._reason == DropReason.MISSION_PARAMS_NOT_SET
+        ):
+            self.navigate_to_tab.emit(2)
+        super().mousePressEvent(event)

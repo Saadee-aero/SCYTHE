@@ -393,6 +393,46 @@ DROP_NOW                     | "Release payload immediately"                    
   - spec/streamlit_baseline/*.reference (frozen historical reference files)
   - Filesystem paths E:\AIRDROP-X in .claude/settings.json and pyrightconfig.json
 
+#### Phase 4.7 — MissionStatusStrip GCS Redesign — COMPLETE
+- [x] MissionStatusStrip rebuilt as paintEvent-based QWidget (no QLabels /
+      no nested QHBoxLayout). Pixel-perfect drawing via QPainter.drawText /
+      drawLine in product/ui/widgets/status_banner.py.
+- [x] Layout: LEFT 25% (HDG/DIST left-aligned) | CENTER 50% (primary status
+      18pt bold + advisory 10pt, center-aligned) | RIGHT 25% (P(HIT)/CEP₅₀
+      right-aligned). Fixed height 72 px (was 56 px — 18 pt primary needs it).
+- [x] Background: #0a0a0a base; center panel tinted by DropStatus
+      (NO_DROP #1a0000, APPROACH #1a0e00, IN_ZONE #001a08, DROP_NOW #002200).
+      Left/right panels stay #0a0a0a.
+- [x] Primary status text colors unchanged (_STATUS_COLOR map preserved).
+- [x] Bottom border: 2 px solid line, status-colored, STATIC (no animation,
+      no glow) — Apache IHADSS annunciator style.
+- [x] Monospace font auto-selected at init: Consolas if available, else
+      Courier New, else Courier. Cached in module-level _MONO_FAMILY.
+- [x] Format helpers: HDG "{:.0f}°"/---, DIST "{:.0f} m"/---, P(HIT) "{:.2f}"
+      (decimal, not percent, per spec)/---, CEP₅₀ "{:.1f} m" or "--- m" when
+      None or >999.9.
+- [x] update_status / update_guidance unchanged externally; both now just
+      store state and call self.update() — simpler than label-setText path.
+- [x] mousePressEvent contract preserved: emit navigate_to_tab(2) only on
+      NO_DROP + MISSION_PARAMS_NOT_SET. WA_TransparentForMouseEvents NOT set.
+- [x] StatusBannerWidget and DropStatus / DropReason enums untouched.
+- [x] New helper: _select_monospace_family(). New constant: _CENTER_TINT.
+
+#### Phase 4.6 — Entry Point Unified — COMPLETE
+- [x] Entry point unified — GUI + backend loops now start together from qt_app/main.py
+- [x] qt_app/main.py creates shared SystemState + TerrainModel, starts
+      TelemetryLoop (50 Hz), GuidanceLoop (12 Hz), BackgroundPlannerLoop (1 Hz)
+      via _BaseLoop.start() (daemon threads), then constructs MainWindow(state=state).
+- [x] UIRenderLoop intentionally NOT started from GUI entry — TacticalMapController
+      QTimer @ 33 ms is the GUI-thread render driver; a second loop would duplicate.
+- [x] MainWindow.__init__ now accepts optional `state: SystemState | None`; falls
+      back to a fresh local SystemState when None (preserves CLI/test compatibility).
+- [x] On QApplication.exec() return, qt_app/main.py sets state.running=False in
+      finally block so loop ticks exit cleanly (daemon=True is the hard guarantee).
+- [x] launch_scythe.bat unchanged — already invokes `python qt_app\main.py`.
+- [x] BUG FIXED: target_position was never set after commit —
+      engine pipeline was starved. Fixed in _on_mission_config_committed.
+
 #### Phase 4.5 — COMPLETE
 - [x] WIND_CORRELATION_RHO = 0.3 constant added at module level in
       product/uncertainty/unscented_state_model.py
@@ -455,6 +495,50 @@ DROP_NOW                     | "Release payload immediately"                    
 
 - CameraFeedLayer is now a viewport-fill QWidget child (resolved prior placeholder
   note). Real camera integration can replace the mock QImage source unchanged.
+  CameraFeed.get_frame() returns None until real camera connected; layer
+  paintEvent draws a dim QColor(0,0,0,40) overlay + "NO CAMERA FEED" text in
+  #444444 10pt Consolas (barely visible, not a solid gray block). Scaling uses
+  Qt.FastTransformation (was SmoothTransformation — caused UI lag).
+
+- Font guard added: qt_app/main_window.py paused_message_label hover handlers
+  (lines ~2014/2021) now guard setPointSizeF with `if new_size > 0` to
+  suppress Qt "Point size <= 0 (-1)" warning when the label font inherits
+  pixelSize-only styling. All three setPointSize(F) call sites audited:
+  main_window.py:2014, main_window.py:2021, product/ui/tactical_map_widget.py:81
+  (hardcoded 20 — safe, no guard added).
+
+- Duplicate scene-item addItem fixed in tactical_map_widget.py: _scale_bar_text
+  was added once by _make_text_item() and again in the zValue-set loop below.
+  Removed from the loop; zValue now set on it separately.
+
+- qt_app.py (top-level legacy) uses PyQt6 — Rule 7 violation — do not use or
+  import from it. The current entry point is qt_app/main.py (PySide6). The
+  legacy file defines a duplicate ScytheMainWindow with a snapshot-only flow
+  and no runtime loops; leave it alone until a supervisor-approved deletion pass.
+
+- TelemetryLoop vs handle_telemetry dict/VehicleState mismatch — FIXED.
+  qt_app/main_window.py handle_telemetry() (Slot for external telemetry)
+  was writing a 2-key dict ({"position": (x,y), "velocity": (vx,vy)}) into
+  SystemState.vehicle_state, while SystemState declares Optional[VehicleState]
+  and every consumer (TelemetryLoop, GuidanceLoop, BackgroundPlannerLoop,
+  tactical_map_controller) uses attribute access (vs.position[0],
+  vs.velocity[0]) against a 3D np.ndarray shape (3,). TelemetryLoop crashed
+  reading vs_prev.position on a dict. Resolution (scope: construction site,
+  per Rule 10): main_window.py:1984 now constructs a proper VehicleState
+  with position=np.array([x,y,0.0]), velocity=np.array([vx,vy,0.0]),
+  acceleration=zeros(3), timestamp=time.time(). Imports added in main_window.py:
+  numpy as np, VehicleState from product.aircraft.
+  Note: after Phase 4.6 unification, BOTH TelemetryLoop (simulated 50 Hz)
+  and handle_telemetry (LIVE-mode Slot) now write vehicle_state. If LIVE
+  telemetry is ever ingested concurrently with TelemetryLoop, they race.
+  Not a bug today (simulated path is the default) but flag before enabling
+  LIVE mode end-to-end.
+
+- target_position now set in _on_mission_config_committed() from cfg
+  target_x/target_y/target_elevation. envelope_dirty=True triggers
+  BackgroundPlannerLoop on next tick. Race-condition note: TelemetryLoop
+  and handle_telemetry both write vehicle_state — safe in simulation mode,
+  revisit for live MAVLink.
 
 - mission_committed flag in SystemState gates MISSION_PARAMS_NOT_SET.
   Set True in _on_mission_config_committed(). Never reset to False in current

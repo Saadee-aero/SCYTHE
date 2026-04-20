@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from product.ui.map_transform import MapTransform
-from product.ui.widgets.status_banner import StatusBannerWidget, DropStatus
+from product.ui.widgets.status_banner import DropStatus
 
 SIGMA_68 = 1.0    # 1-sigma, 68.27% confidence for 2D Gaussian
 SIGMA_95 = 2.448  # sqrt(chi2.ppf(0.95, df=2)) = sqrt(5.991)
@@ -38,6 +38,7 @@ class CameraFeedLayer(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._pixmap: QPixmap | None = None
+        self._needs_redraw = True
 
     def update_frame(self, image) -> None:
         if image is None:
@@ -47,15 +48,25 @@ class CameraFeedLayer(QWidget):
             if pm.isNull():
                 return
             self._pixmap = pm
+            self._needs_redraw = True
             self.update()
         except Exception:
             return
 
     def paintEvent(self, event) -> None:
-        if self._pixmap is None:
+        if not self._needs_redraw:
             return
         painter = QPainter(self)
+        if self._pixmap is None or self._pixmap.isNull():
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 40))
+            font = QFont("Consolas", 10)
+            painter.setFont(font)
+            painter.setPen(QColor("#444444"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "NO CAMERA FEED")
+            self._needs_redraw = False
+            return
         painter.drawPixmap(0, 0, self._pixmap)
+        self._needs_redraw = False
 
 
 class WindIndicatorLayer(QWidget):
@@ -803,7 +814,9 @@ class TacticalMapWidget(QGraphicsView):
         self._scale_bar_tick_a = QGraphicsLineItem()
         self._scale_bar_tick_b = QGraphicsLineItem()
         self._scale_bar_text = self._make_text_item("0 ----- 50m", 0, 0, QColor("#00ff41"), QFont("Consolas", 9))
-        for item in (self._scale_bar_line, self._scale_bar_tick_a, self._scale_bar_tick_b, self._scale_bar_text):
+        # _scale_bar_text already added to scene by _make_text_item — set zValue only.
+        self._scale_bar_text.setZValue(100)
+        for item in (self._scale_bar_line, self._scale_bar_tick_a, self._scale_bar_tick_b):
             item.setZValue(100)
             self.scene.addItem(item)
         self._update_scale_bar()
@@ -825,10 +838,6 @@ class TacticalMapWidget(QGraphicsView):
         self._camera_feed_layer = CameraFeedLayer(self.viewport())
         self._reposition_camera_feed()
         self._camera_feed_layer.show()
-
-        self._status_banner = StatusBannerWidget(self.viewport())
-        self._reposition_status_banner()
-        self._status_banner.show()
 
         self._wind_indicator = WindIndicatorLayer(self.viewport())
         self._reposition_wind_indicator()
@@ -886,7 +895,6 @@ class TacticalMapWidget(QGraphicsView):
 
     def resizeEvent(self, event) -> None:
         self._reposition_camera_feed()
-        self._reposition_status_banner()
         self._reposition_wind_indicator()
         super().resizeEvent(event)
         self._update_grid()
@@ -897,16 +905,6 @@ class TacticalMapWidget(QGraphicsView):
             self._camera_feed_layer.setGeometry(
                 0, 0, viewport.width(), viewport.height()
             )
-
-    def _reposition_status_banner(self):
-        if hasattr(self, '_status_banner'):
-            viewport = self.viewport()
-            vw = viewport.width()
-            banner_w = 320
-            banner_h = 64
-            x = (vw - banner_w) // 2
-            y = 10
-            self._status_banner.setGeometry(x, y, banner_w, banner_h)
 
     def _reposition_wind_indicator(self):
         if hasattr(self, '_wind_indicator'):
@@ -964,15 +962,18 @@ class TacticalMapWidget(QGraphicsView):
         self._corridor_collapsed = self.corridor_layer.is_collapsed()
 
     def update_camera_feed(self, image) -> None:
-        # Raw overlay, no georeferencing — silent fail on None.
+        # Raw overlay, no georeferencing — None triggers NO CAMERA overlay.
         if image is None:
+            self._camera_feed_layer._pixmap = None
+            self._camera_feed_layer._needs_redraw = True
+            self._camera_feed_layer.update()
             return
         vp = self.viewport()
         scaled = image.scaled(
             vp.width(),
             vp.height(),
             Qt.IgnoreAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.FastTransformation,
         )
         self._camera_feed_layer.update_frame(scaled)
 

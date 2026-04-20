@@ -22,11 +22,13 @@ from product.ui.widgets.status_banner import DropStatus, DropReason
 class TacticalMapController(QObject):
     """Bridge SystemState to TacticalMapWidget at ~30 Hz."""
 
-    def __init__(self, system_state: SystemState, tab: TacticalMapTab, parent: Optional[QObject] = None) -> None:
+    def __init__(self, system_state: SystemState, tab: TacticalMapTab,
+                 status_strip=None, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._state = system_state
         self._tab = tab
         self._widget = tab.map_widget
+        self._status_strip = status_strip
         self._timer = QTimer(self)
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._on_tick)
@@ -60,6 +62,8 @@ class TacticalMapController(QObject):
         frame = self._camera_feed.get_frame(vp.width(), vp.height())
         self._widget.update_camera_feed(frame)
 
+        # TEMP: remove after profiling
+        t0 = time.perf_counter()
         with self._state.lock:
             assert getattr(self._state, "monte_carlo_running", False) is False
             vehicle_state = getattr(self._state, "vehicle_state", None)
@@ -81,6 +85,9 @@ class TacticalMapController(QObject):
             if release_corridor is None:
                 release_corridor = self._get(envelope_result, "release_corridor", None)
             mission_committed = getattr(self._state, "mission_committed", False)
+
+        # TEMP: remove after profiling
+        t1 = time.perf_counter()
 
         vehicle_pos, vehicle_heading, vehicle_velocity = self._extract_vehicle(vehicle_state)
         if vehicle_pos is not None and vehicle_heading is not None:
@@ -127,7 +134,8 @@ class TacticalMapController(QObject):
             guidance_result, vehicle_state, target_position,
             wind_variance, wind_variance_threshold, mission_committed,
         )
-        self._widget._status_banner.set_status(drop_status, drop_reason)
+        if self._status_strip is not None:
+            self._status_strip.update_status(drop_status, drop_reason)
 
         if wind_variance is not None and wind_variance_threshold is not None:
             self._widget.update_wind_warning(float(wind_variance) > float(wind_variance_threshold))
@@ -143,6 +151,36 @@ class TacticalMapController(QObject):
             p_hit_val = p_hit
         self._widget.update_p_hit(p_hit_val, ci)
 
+        # Guidance + probability readouts into the strip's CENTER/RIGHT sections.
+        # heading_error: radians (corridor_guidance.py) → degrees for display.
+        # distance_to_corridor: meters.
+        # CEP50: per §7.13 = 0.8326 * sqrt(λ1+λ2). tactical_state.ellipse_axes
+        # stores semi-axes (a, b) = (sqrt(λ_major), sqrt(λ_minor)); so
+        # λ1+λ2 = a² + b². Trivial-case check: isotropic σ → a=b=σ → CEP =
+        # 0.8326·sqrt(2)·σ = 1.1774·σ (matches circular CEP50 formula).
+        if self._status_strip is not None:
+            if guidance_result is not None:
+                he = self._get(guidance_result, "heading_error", None)
+                dtc = self._get(guidance_result, "distance_to_corridor", None)
+                heading_deg = math.degrees(float(he)) if he is not None else None
+                dist_m = float(dtc) if dtc is not None else None
+            else:
+                heading_deg = None
+                dist_m = None
+            cep_m = None
+            if isinstance(tactical_state, TacticalMapState):
+                axes = getattr(tactical_state, "ellipse_axes", None)
+                if axes:
+                    try:
+                        a = float(axes[0]); b = float(axes[1])
+                        cep_m = 0.8326 * math.sqrt(max(a * a + b * b, 0.0))
+                    except (TypeError, ValueError, IndexError):
+                        cep_m = None
+            self._status_strip.update_guidance(heading_deg, dist_m, p_hit_val, cep_m)
+
+        # TEMP: remove after profiling
+        t2 = time.perf_counter()
+
         t_drop = self._compute_drop_time(vehicle_state, release_corridor)
         self._widget.update_release_timer(t_drop)
 
@@ -152,6 +190,15 @@ class TacticalMapController(QObject):
             self._widget.update_drift(release_point[0], release_point[1], impact_mean[0], impact_mean[1])
         else:
             self._widget.drift_arrow.set_visible(False)
+
+        # TEMP: remove after profiling
+        t3 = time.perf_counter()
+        if (t3 - t0) * 1000.0 > 50.0:
+            logger.warning(
+                f"LAG BREAKDOWN: A={1000 * (t1 - t0):.1f}ms "
+                f"B={1000 * (t2 - t1):.1f}ms "
+                f"C={1000 * (t3 - t2):.1f}ms"
+            )
 
         # TEMP: remove before v1.0 release
         elapsed_ms = (time.perf_counter() - t_start) * 1000

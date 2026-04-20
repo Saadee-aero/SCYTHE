@@ -37,10 +37,12 @@ from telemetry import TelemetryWorker
 from widgets import NoWheelDoubleSpinBox, NoWheelSlider, StatusStrip
 from product.ui import qt_bridge
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+import numpy as np
+from product.aircraft import VehicleState
 from product.runtime.system_state import SystemState
 from product.ui.tactical_map_controller import TacticalMapController
 from product.ui.tabs.tactical_map_tab import TacticalMapTab
-from product.ui.widgets.status_banner import DropStatus, DropReason
+from product.ui.widgets.status_banner import DropStatus, DropReason, MissionStatusStrip
 from product.ui.tabs import (
     analysis as analysis_tab_renderer,
     mission_overview as mission_overview_tab_renderer,
@@ -112,8 +114,9 @@ class SimulationWorker(QThread):
 class MainWindow(QMainWindow):
     """Phase 1 desktop shell: structure + placeholders only."""
 
-    def __init__(self) -> None:
+    def __init__(self, state: "SystemState | None" = None) -> None:
         super().__init__()
+        self._injected_state = state
         self.current_mode = "standard"
         self.system_mode = "SNAPSHOT"
         self.current_snapshot_id = None
@@ -134,7 +137,10 @@ class MainWindow(QMainWindow):
         self.auto_evaluate_paused = False
         self.mission_fig_op = None
         self.mission_canvas_op = None
-        self.system_state = SystemState()
+        # Use externally-supplied state if provided (unified entry point
+        # in qt_app/main.py passes the same SystemState shared with the
+        # runtime loops). Fall back to a fresh local SystemState otherwise.
+        self.system_state = self._injected_state if self._injected_state is not None else SystemState()
         # Application state control (Operator Mode only)
         self.app_state = AppState.NO_PAYLOAD
         self._last_applied_payload_key = None  # Track payload to detect changes
@@ -164,7 +170,8 @@ class MainWindow(QMainWindow):
         self._refresh_mode_buttons()
         self._start_telemetry()
         self.tactical_map_controller = TacticalMapController(
-            self.system_state, self.tactical_map, parent=self
+            self.system_state, self.tactical_map,
+            status_strip=self.mission_status_strip, parent=self
         )
         self.tactical_map_controller.start()
 
@@ -189,6 +196,10 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(10)
+
+        # Persistent mission status strip above all tabs — always visible.
+        self.mission_status_strip = MissionStatusStrip(right_container)
+        right_layout.addWidget(self.mission_status_strip)
 
         self.main_tabs = QTabWidget(right_container)
         self.main_tabs.setObjectName("mainTabs")
@@ -243,8 +254,8 @@ class MainWindow(QMainWindow):
             cfg = dict(self.config_state.data)
         self.mission_config_tab.init_from_config(cfg)
         self.mission_config_tab.apply_system_mode(self.system_mode)
-        self.tactical_map_widget._status_banner.navigate_to_tab.connect(self._switch_to_tab)
-        self.tactical_map_widget._status_banner.set_status(
+        self.mission_status_strip.navigate_to_tab.connect(self._switch_to_tab)
+        self.mission_status_strip.update_status(
             DropStatus.NO_DROP, DropReason.MISSION_PARAMS_NOT_SET
         )
         tr = float(cfg.get("target_radius", 5.0))
@@ -713,6 +724,17 @@ class MainWindow(QMainWindow):
         self.app_state = AppState.PAYLOAD_SELECTED
         with self.system_state.lock:
             self.system_state.mission_committed = True
+
+            # Wire target position into SystemState so BackgroundPlannerLoop
+            # can compute release envelope. Without this, planner early-returns
+            # every tick and guidance_result stays None permanently.
+            target_x = float(cfg.get("target_x", 72.0))
+            target_y = float(cfg.get("target_y", 0.0))
+            target_z = float(cfg.get("target_elevation", 0.0))
+            self.system_state.target_position = np.array(
+                [target_x, target_y, target_z], dtype=float
+            )
+            self.system_state.envelope_dirty = True
         self._update_summary_strip_after_commit()
         self.main_tabs.setCurrentIndex(0)
         self._render_mission_tab()
@@ -1972,10 +1994,12 @@ class MainWindow(QMainWindow):
             y = float(self._last_telemetry.get("y", 0.0) or 0.0)
             vx = float(self._last_telemetry.get("vx", 0.0) or 0.0)
             vy = float(self._last_telemetry.get("vy", 0.0) or 0.0)
-            self.system_state.vehicle_state = {
-                "position": (x, y),
-                "velocity": (vx, vy),
-            }
+            self.system_state.vehicle_state = VehicleState(
+                position=np.array([x, y, 0.0], dtype=float),
+                velocity=np.array([vx, vy, 0.0], dtype=float),
+                acceleration=np.zeros(3, dtype=float),
+                timestamp=time.time(),
+            )
         if self.system_mode == "LIVE":
             self._apply_live_telemetry_to_config()
             self._push_config_to_worker()
@@ -2011,14 +2035,16 @@ class MainWindow(QMainWindow):
                 if event.type() == QEvent.Type.Enter:
                     current = self.paused_message_label.font()
                     new_size = max(8.0, current.pointSizeF() + 1.0)
-                    current.setPointSizeF(new_size)
+                    if new_size > 0:
+                        current.setPointSizeF(new_size)
                     self.paused_message_label.setFont(current)
                     self.paused_message_label.setStyleSheet("color: #f0f0f0; font-size: 12px; padding: 4px;")
                     return False
                 if event.type() == QEvent.Type.Leave:
                     current = self.paused_message_label.font()
                     new_size = max(8.0, current.pointSizeF() - 1.0)
-                    current.setPointSizeF(new_size)
+                    if new_size > 0:
+                        current.setPointSizeF(new_size)
                     self.paused_message_label.setFont(current)
                     self.paused_message_label.setStyleSheet("color: #d4a017; font-size: 11px; padding: 4px;")
                     return False
