@@ -1309,6 +1309,10 @@ class MainWindow(QMainWindow):
         pass
 
     def _render_sensor_tab(self) -> None:
+        _now = time.monotonic()
+        if _now - getattr(self, "_last_telemetry_draw", 0.0) < 0.5:
+            return
+        self._last_telemetry_draw = _now
         self.telemetry_fig.clear()
         ax = self.telemetry_fig.add_subplot(1, 1, 1)
         telem = self._last_telemetry or {}
@@ -1341,13 +1345,13 @@ class MainWindow(QMainWindow):
             wind_std_dev_ms=wind_std,
             telemetry_live=(self.system_mode == "LIVE"),
         )
-        try:
-            self.telemetry_fig.tight_layout()
-        except Exception:
-            pass
         self.telemetry_canvas.draw_idle()
 
     def _render_system_tab(self) -> None:
+        _now = time.monotonic()
+        if _now - getattr(self, "_last_system_draw", 0.0) < 0.5:
+            return
+        self._last_system_draw = _now
         from configs import mission_configs as cfg
 
         self.system_fig.clear()
@@ -1366,10 +1370,6 @@ class MainWindow(QMainWindow):
             snapshot_created_at=self._snapshot_created_at,
             warnings=warnings,
         )
-        try:
-            self.system_fig.tight_layout()
-        except Exception:
-            pass
         self.system_canvas.draw_idle()
 
     def _update_system_state_from_snapshot(self, snapshot: dict) -> None:

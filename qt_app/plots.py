@@ -9,6 +9,8 @@ without updating any code that may import it.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation
 from PySide6.QtWidgets import QGraphicsOpacityEffect
@@ -26,6 +28,7 @@ class ImpactDispersionCanvas(FigureCanvasQTAgg):
         self.ax = self.figure.add_subplot(111)
         self.current_mode = "standard"
         self._last_snapshot = None
+        self._last_draw_ts = 0.0
         super().__init__(self.figure)
         if parent is not None:
             self.setParent(parent)
@@ -74,7 +77,10 @@ class ImpactDispersionCanvas(FigureCanvasQTAgg):
             self.ax.set_xlim(-20, 20)
             self.ax.set_ylim(-20, 20)
             self.ax.set_aspect("equal", adjustable="box")
-            self.draw_idle()
+            _now = time.monotonic()
+            if _now - self._last_draw_ts >= 0.5:
+                self._last_draw_ts = _now
+                self.draw_idle()
             return
         self.plot_from_snapshot(self._last_snapshot)
 
@@ -278,4 +284,7 @@ class ImpactDispersionCanvas(FigureCanvasQTAgg):
             self.ax.set_xlim(-20, 20)
             self.ax.set_ylim(-20, 20)
         self.ax.set_aspect("equal", adjustable="box")
-        self.draw_idle()
+        _now = time.monotonic()
+        if _now - self._last_draw_ts >= 0.5:
+            self._last_draw_ts = _now
+            self.draw_idle()

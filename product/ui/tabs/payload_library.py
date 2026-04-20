@@ -707,7 +707,7 @@ class PayloadLibraryTab:
                 y -= 0.004
 
         self._showing = True
-        fig.canvas.draw()
+        fig.canvas.draw_idle()
 
     def _rebuild_geometry_ui(self, fig):
         # Clear existing geometry specific widgets
@@ -812,7 +812,7 @@ class PayloadLibraryTab:
                     self._state["cd_source"] = "Literature"
                     self._update_calculations()
                     self._rebuild_geometry_ui(fig)
-                    fig.canvas.draw()
+                    fig.canvas.draw_idle()
 
                 return _h
 
@@ -1167,7 +1167,7 @@ class PayloadLibraryTab:
                 return
             if self._showing:
                 self._clear_all_choice_buttons(fig)
-                fig.canvas.draw()
+                fig.canvas.draw_idle()
             else:
                 self._redraw_dropdown(fig, main_btn, None, _dd_cat_clk)
 

@@ -50,20 +50,25 @@ class TacticalMapController(QObject):
         if self._last_tick is not None:
             interval = now - self._last_tick
             if interval > 0.05:
-                print("[TacticalMap] UI lag detected")
+                dt_ms = interval * 1000.0
+                print(f"[TacticalMap] UI lag detected | dt={dt_ms:.1f}ms")
         self._last_tick = now
         self._frame_count += 1
         if self._frame_count % 300 == 0:
             self._widget.normalize_transform()
 
+        # TEMP: perf instrumentation
+        _t_hud0 = time.perf_counter()
         # Camera feed: trace CameraFeed.get_frame() → widget.update_camera_feed() →
         # CameraFeedLayer.update_frame() at 30 Hz (TacticalMapController tick rate).
         vp = self._widget.viewport()
         frame = self._camera_feed.get_frame(vp.width(), vp.height())
         self._widget.update_camera_feed(frame)
+        _t_hud1 = time.perf_counter()
 
         # TEMP: remove after profiling
         t0 = time.perf_counter()
+        _t_eng0 = t0
         with self._state.lock:
             assert getattr(self._state, "monte_carlo_running", False) is False
             vehicle_state = getattr(self._state, "vehicle_state", None)
@@ -180,6 +185,8 @@ class TacticalMapController(QObject):
 
         # TEMP: remove after profiling
         t2 = time.perf_counter()
+        _t_eng1 = t2
+        _t_paint0 = t2
 
         t_drop = self._compute_drop_time(vehicle_state, release_corridor)
         self._widget.update_release_timer(t_drop)
@@ -193,6 +200,11 @@ class TacticalMapController(QObject):
 
         # TEMP: remove after profiling
         t3 = time.perf_counter()
+        _t_paint1 = t3
+        hud_ms = (_t_hud1 - _t_hud0) * 1000.0
+        eng_ms = (_t_eng1 - _t_eng0) * 1000.0
+        paint_ms = (_t_paint1 - _t_paint0) * 1000.0
+        print(f"HUD={hud_ms:.1f}ms ENGINE={eng_ms:.1f}ms PAINT={paint_ms:.1f}ms")
         if (t3 - t0) * 1000.0 > 50.0:
             logger.warning(
                 f"LAG BREAKDOWN: A={1000 * (t1 - t0):.1f}ms "

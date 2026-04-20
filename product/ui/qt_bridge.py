@@ -43,8 +43,4 @@ def render_into_single_axes(
     """
     ax = fig.add_subplot(1, 1, 1)
     render_fn(ax, *args, **kwargs)
-    try:
-        fig.tight_layout()
-    except Exception:
-        pass
 
