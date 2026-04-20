@@ -168,7 +168,7 @@ def run_simulation_from_config(
     return snapshot
 
 
-class AirdropMainWindow(QMainWindow):
+class ScytheMainWindow(QMainWindow):
     """Qt main window hosting the SCYTHE tabs."""
 
     def __init__(self, snapshot: Dict[str, Any], telemetry_buffer: Optional[StateBuffer] = None) -> None:
@@ -596,7 +596,7 @@ def main(telemetry_buffer: Optional[StateBuffer] = None) -> None:
 
     app = QApplication(sys.argv)
     app.setStyleSheet(_HUD_STYLESHEET)
-    window = AirdropMainWindow(snapshot, telemetry_buffer=telemetry_buffer)
+    window = ScytheMainWindow(snapshot, telemetry_buffer=telemetry_buffer)
     window.resize(1200, 720)
     window.show()
     sys.exit(app.exec())

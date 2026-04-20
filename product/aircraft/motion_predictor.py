@@ -58,6 +58,17 @@ class MotionPredictor:
             np.asarray(velocity, dtype=float).reshape(3),
         )
 
-    def get_drop_status(self) -> DropStatus:
-        # TODO: Implement real drop status logic based on corridor, zone, and timing
-        return DropStatus.NO_DROP
+    def get_drop_status(self, guidance_status: str = "") -> DropStatus:
+        """Map a guidance status string to DropStatus enum.
+
+        guidance_status: string from GuidanceResult.status
+            ("NO_DROP", "APPROACH_CORRIDOR", "IN_DROP_ZONE", "DROP_NOW")
+        Returns DropStatus.NO_DROP when no guidance data is available.
+        """
+        _MAP = {
+            "NO_DROP": DropStatus.NO_DROP,
+            "APPROACH_CORRIDOR": DropStatus.APPROACH_CORRIDOR,
+            "IN_DROP_ZONE": DropStatus.IN_DROP_ZONE,
+            "DROP_NOW": DropStatus.DROP_NOW,
+        }
+        return _MAP.get((guidance_status or "").strip().upper(), DropStatus.NO_DROP)

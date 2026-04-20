@@ -29,6 +29,7 @@ from product.runtime.runtime_loops import (
     UIRenderLoop,
 )
 from product.runtime.system_state import SystemState
+from product.terrain import TerrainModel
 
 
 def main() -> None:
@@ -39,11 +40,15 @@ def main() -> None:
     state.target_position = np.array([72.0, 0.0, 0.0], dtype=float)
     state.settings["drop_probability_threshold"] = 0.5
 
+    # Single TerrainModel instance flows into BackgroundPlannerLoop for
+    # ground-elevation lookup at target_x/target_y when building PropagationContext.
+    terrain = TerrainModel()
+
     # Instantiate loops with requested rates.
     telemetry = TelemetryLoop(state, update_rate_hz=50.0)
     guidance = GuidanceLoop(state, update_rate_hz=12.0)
     ui = UIRenderLoop(state, update_rate_hz=30.0)
-    planner = BackgroundPlannerLoop(state, update_rate_hz=1.0)
+    planner = BackgroundPlannerLoop(state, update_rate_hz=1.0, terrain=terrain)
 
     loops = [telemetry, guidance, ui, planner]
 

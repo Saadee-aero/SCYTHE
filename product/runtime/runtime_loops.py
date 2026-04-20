@@ -32,6 +32,7 @@ from product.explorer import compute_release_envelope
 from product.guidance.corridor_guidance import compute_corridor_guidance
 from product.physics.propagation_context import build_propagation_context
 from product.runtime.system_state import SystemState
+from product.terrain import TerrainModel
 
 
 class _BaseLoop:
@@ -172,8 +173,14 @@ class BackgroundPlannerLoop(_BaseLoop):
     vehicle_state and target_position.
     """
 
-    def __init__(self, system_state: SystemState, update_rate_hz: float = 1.0):
+    def __init__(
+        self,
+        system_state: SystemState,
+        update_rate_hz: float = 1.0,
+        terrain: Optional[TerrainModel] = None,
+    ):
         super().__init__(system_state, update_rate_hz, name="BackgroundPlannerLoop")
+        self._terrain = terrain if terrain is not None else TerrainModel()
 
         # Minimal config-like object with required attributes.
         # Use coarse grid for real-time (~15s per envelope):
@@ -186,7 +193,9 @@ class BackgroundPlannerLoop(_BaseLoop):
             max_release_time = 2.5
             release_time_step = 0.25
             target_radius = 15.0
-            release_delay = 0.1
+            # Actuator delay 0.3s: accounts for release mechanism
+            # servo + trigger latency at operational speeds
+            release_delay = 0.3
             wind_sigma0 = 0.8
             wind_sigma_altitude_coeff = 0.001
             wind_sigma_max = 4.0
@@ -222,16 +231,17 @@ class BackgroundPlannerLoop(_BaseLoop):
             area = float(settings.get("area", 0.01))
             wind_mean = np.array(settings.get("wind_mean", [2.0, 0.0, 0.0]), dtype=float)
             dt = 0.05
+            target_pos = np.asarray(target, dtype=float).reshape(-1)
+            ground_z = float(self._terrain.get_elevation(float(target_pos[0]), float(target_pos[1])))
             context = build_propagation_context(
                 mass=mass,
                 Cd=Cd,
                 area=area,
                 wind_ref=wind_mean.reshape(3),
                 shear=None,
-                target_z=0.0,
+                target_z=ground_z,
                 dt=dt,
             )
-            target_pos = np.asarray(target, dtype=float).reshape(-1)
             logger.debug("BackgroundPlannerLoop: computing release envelope")
             with _suppress_timing():
                 env = compute_release_envelope(

@@ -50,7 +50,7 @@ def predict_mean_impact(
 
     t_sim = 0.0
     step = 0
-    _debug = bool(os.environ.get("AIRDROP_DEBUG"))
+    _debug = bool(os.environ.get("SCYTHE_DEBUG"))
     if _debug:
         t0 = time.perf_counter()
 

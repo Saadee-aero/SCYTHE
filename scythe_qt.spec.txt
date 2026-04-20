@@ -20,7 +20,7 @@ Or without the spec file (minimal):
 Key notes
 ---------
 
-- Entry point: `qt_app.py` (creates QApplication and AirdropMainWindow).
+- Entry point: `qt_app.py` (creates QApplication and ScytheMainWindow).
 - Required Python packages at build time:
   - PyQt6
   - matplotlib

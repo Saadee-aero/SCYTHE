@@ -22,6 +22,13 @@ from typing import Tuple
 import numpy as np
 
 
+WIND_CORRELATION_RHO = 0.3
+# Correlation between wind_x and wind_y bias errors.
+# Justified by heading estimation uncertainty (sigma_theta ~ 17 deg).
+# ρ=0.3 is conservative. Range [0, 1). Must satisfy rho < 1.
+# Off-diagonal term: Sigma[0,1] = rho * var_wind.
+
+
 def build_uncertainty_model(context, config) -> Tuple[np.ndarray, np.ndarray]:
     """
     Build Gaussian uncertainty model (µ, Σ) for the Unscented Transform state.
@@ -96,8 +103,21 @@ def build_uncertainty_model(context, config) -> Tuple[np.ndarray, np.ndarray]:
     Sigma[3, 3] = var_release    # release_y_error
     Sigma[4, 4] = var_velocity   # velocity_bias
 
+    # Wind x/y correlation from heading uncertainty (CLAUDE.md §7.9 note)
+    # Sigma[0,1] = Sigma[1,0] = WIND_CORRELATION_RHO * var_wind
+    rho_wind = WIND_CORRELATION_RHO * float(var_wind)
+    Sigma[0, 1] = rho_wind
+    Sigma[1, 0] = rho_wind
+
+    # PD check: for 2x2 wind block, det = var_wind^2 * (1 - rho^2)
+    # At rho=0.3: det = var_wind^2 * 0.91 > 0 — confirmed PD
+
     # Enforce exact symmetry for numerical robustness (e.g. Cholesky).
     Sigma = 0.5 * (Sigma + Sigma.T)
+
+    # Guard: catch any future rho >= 1 misconfiguration
+    assert WIND_CORRELATION_RHO < 1.0, \
+        f"WIND_CORRELATION_RHO must be < 1 for PD matrix, got {WIND_CORRELATION_RHO}"
 
     return mu, Sigma
 

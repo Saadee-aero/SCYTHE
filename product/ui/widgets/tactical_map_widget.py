@@ -5,21 +5,123 @@ import random
 from typing import Iterable, List, Tuple
 
 from PySide6.QtCore import QPointF, Qt, QRectF
-from PySide6.QtGui import QBrush, QFont, QPen, QPolygonF, QPainter, QColor, QTransform
+from PySide6.QtGui import QBrush, QFont, QImage, QPen, QPixmap, QPolygonF, QPainter, QColor, QTransform
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsItemGroup,
     QGraphicsLineItem,
+    QGraphicsPixmapItem,
     QGraphicsPolygonItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
+    QWidget,
 )
 
 from product.ui.map_transform import MapTransform
 from product.ui.widgets.status_banner import StatusBannerWidget, DropStatus
+
+SIGMA_68 = 1.0    # 1-sigma, 68.27% confidence for 2D Gaussian
+SIGMA_95 = 2.448  # sqrt(chi2.ppf(0.95, df=2)) = sqrt(5.991)
+
+
+class CameraFeedLayer(QWidget):
+    """Viewport-fill camera feed layer. Bottom of viewport-child z-order.
+
+    Raw pixel overlay — no georeferencing. Silent fail on None frame.
+    """
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._pixmap: QPixmap | None = None
+
+    def update_frame(self, image) -> None:
+        if image is None:
+            return
+        try:
+            pm = QPixmap.fromImage(image)
+            if pm.isNull():
+                return
+            self._pixmap = pm
+            self.update()
+        except Exception:
+            return
+
+    def paintEvent(self, event) -> None:
+        if self._pixmap is None:
+            return
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._pixmap)
+
+
+class WindIndicatorLayer(QWidget):
+    """Viewport-fixed wind indicator: arrow + speed label at bottom-left.
+
+    Per §14 Phase 4.1: fixed screen position, arrow length 20-80 px proportional
+    to wind speed, ENU direction Y-flipped for Qt screen coords, white 9pt label.
+    """
+
+    _ARROW_MIN_PX = 20.0
+    _ARROW_MAX_PX = 80.0
+    _SPEED_TO_PX = 10.0  # m/s -> pixels scale factor
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._wind_x = 0.0
+        self._wind_y = 0.0
+        self._speed = 0.0
+        self.setFixedSize(120, 100)
+        self.hide()
+
+    def update_wind(self, wind_x: float, wind_y: float) -> None:
+        self._wind_x = float(wind_x)
+        self._wind_y = float(wind_y)
+        self._speed = math.hypot(self._wind_x, self._wind_y)
+        self.show()
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            cx = self.width() / 2.0
+            cy = self.height() / 2.0 - 8.0
+            length = min(self._ARROW_MAX_PX,
+                         max(self._ARROW_MIN_PX, self._speed * self._SPEED_TO_PX))
+            # ENU -> Qt screen: Y-flip. Downwind direction = (wind_x, wind_y).
+            angle = math.atan2(-self._wind_y, self._wind_x) if self._speed > 1e-6 else 0.0
+            x1 = cx - 0.5 * length * math.cos(angle)
+            y1 = cy - 0.5 * length * math.sin(angle)
+            x2 = cx + 0.5 * length * math.cos(angle)
+            y2 = cy + 0.5 * length * math.sin(angle)
+            pen = QPen(QColor("#ffffff"), 2)
+            p.setPen(pen)
+            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+            # Arrowhead at (x2, y2).
+            head = 8.0
+            left = angle + math.radians(150)
+            right = angle - math.radians(150)
+            poly = QPolygonF([
+                QPointF(x2, y2),
+                QPointF(x2 + head * math.cos(left), y2 + head * math.sin(left)),
+                QPointF(x2 + head * math.cos(right), y2 + head * math.sin(right)),
+            ])
+            p.setBrush(QBrush(QColor("#ffffff")))
+            p.drawPolygon(poly)
+            # Label below arrow.
+            p.setFont(QFont("Consolas", 9))
+            p.setPen(QColor("#ffffff"))
+            label = f"{self._speed:.1f} m/s"
+            p.drawText(QRectF(0.0, self.height() - 18.0, float(self.width()), 16.0),
+                       int(Qt.AlignHCenter | Qt.AlignVCenter), label)
+        finally:
+            p.end()
 
 
 class UAVMarker(QGraphicsPolygonItem):
@@ -52,35 +154,49 @@ class ImpactEllipseLayer:
     def __init__(self, scene: QGraphicsScene) -> None:
         self._ellipse_68 = QGraphicsEllipseItem()
         self._ellipse_95 = QGraphicsEllipseItem()
-        self._ellipse_outer = QGraphicsEllipseItem()
 
-        green = QColor("#00ff41")
-        amber = QColor("#ffaa00")
-        red = QColor("#ff3344")
+        green = QColor("#00AA44")
+        amber = QColor("#FF8C00")
         self._ellipse_68.setPen(QPen(green, 2))
         self._ellipse_95.setPen(QPen(amber, 2))
-        self._ellipse_outer.setPen(QPen(red, 1))
 
         green_brush = QColor(green)
-        green_brush.setAlpha(40)
+        green_brush.setAlpha(120)
         amber_brush = QColor(amber)
-        amber_brush.setAlpha(30)
-        red_brush = QColor(red)
-        red_brush.setAlpha(20)
+        amber_brush.setAlpha(80)
         self._ellipse_68.setBrush(QBrush(green_brush))
         self._ellipse_95.setBrush(QBrush(amber_brush))
-        self._ellipse_outer.setBrush(QBrush(red_brush))
 
-        self._ellipse_68.setOpacity(0.25)
-        self._ellipse_95.setOpacity(0.2)
-        self._ellipse_outer.setOpacity(0.15)
+        self._ellipse_68.setOpacity(1.0)
+        self._ellipse_95.setOpacity(1.0)
 
         self._ellipse_68.setZValue(2)
         self._ellipse_95.setZValue(2)
-        self._ellipse_outer.setZValue(2)
         scene.addItem(self._ellipse_68)
         scene.addItem(self._ellipse_95)
-        scene.addItem(self._ellipse_outer)
+
+    def update(self, mean_x: float, mean_y: float, a: float, b: float, angle: float) -> None:
+        self._update_item(self._ellipse_68, mean_x, mean_y, a, b, angle, scale=SIGMA_68)
+        self._update_item(self._ellipse_95, mean_x, mean_y, a, b, angle, scale=SIGMA_95)
+
+    @staticmethod
+    def _update_item(
+        item: QGraphicsEllipseItem,
+        mean_x: float,
+        mean_y: float,
+        a: float,
+        b: float,
+        angle: float,
+        scale: float,
+    ) -> None:
+        ax = float(a) * scale
+        by = float(b) * scale
+        cx = float(mean_x)
+        cy = float(mean_y)
+        rect = QRectF(cx - ax, cy - by, ax * 2.0, by * 2.0)
+        item.setRect(rect)
+        item.setTransformOriginPoint(cx, cy)
+        item.setRotation(float(angle))
 
 
 class TargetMarker(QGraphicsItemGroup):
@@ -103,40 +219,17 @@ class TargetMarker(QGraphicsItemGroup):
     def set_position(self, x: float, y: float) -> None:
         self.setPos(float(x), float(y))
 
-    def update(self, mean_x: float, mean_y: float, a: float, b: float, angle: float) -> None:
-        self._update_item(self._ellipse_68, mean_x, mean_y, a, b, angle, scale=1.0)
-        self._update_item(self._ellipse_95, mean_x, mean_y, a, b, angle, scale=2.0)
-        self._update_item(self._ellipse_outer, mean_x, mean_y, a, b, angle, scale=3.0)
-
-    @staticmethod
-    def _update_item(
-        item: QGraphicsEllipseItem,
-        mean_x: float,
-        mean_y: float,
-        a: float,
-        b: float,
-        angle: float,
-        scale: float,
-    ) -> None:
-        ax = float(a) * scale
-        by = float(b) * scale
-        cx = float(mean_x)
-        cy = float(mean_y)
-        rect = QRectF(cx - ax, cy - by, ax * 2.0, by * 2.0)
-        item.setRect(rect)
-        item.setTransformOriginPoint(cx, cy)
-        item.setRotation(float(angle))
-
 
 class CorridorLayer(QGraphicsPolygonItem):
     """Release corridor polygon with centerline."""
 
     def __init__(self, scene: QGraphicsScene) -> None:
         super().__init__()
-        border = QColor("#00ffff")
-        fill = QColor("#00ffff")
-        fill.setAlpha(15)
-        self.setPen(QPen(border, 3))
+        border = QColor("#00AA44")
+        border.setAlpha(180)
+        fill = QColor("#00AA44")
+        fill.setAlpha(40)
+        self.setPen(QPen(border, 1))
         self.setBrush(QBrush(fill))
         self.setZValue(4)
         self.setZValue(2)
@@ -260,61 +353,6 @@ class GuidanceArrow:
     def _update_head(self, x1: float, y1: float, x2: float, y2: float) -> None:
         angle = math.atan2(float(y2) - float(y1), float(x2) - float(x1))
         size = 10.0
-        left = angle + math.radians(150)
-        right = angle - math.radians(150)
-        p1 = QPointF(float(x2), float(y2))
-        p2 = QPointF(float(x2) + size * math.cos(left), float(y2) + size * math.sin(left))
-        p3 = QPointF(float(x2) + size * math.cos(right), float(y2) + size * math.sin(right))
-        self._head.setPolygon(QPolygonF([p1, p2, p3]))
-
-
-class WindHUDItem(QGraphicsLineItem):
-    """Wind vector HUD arrow with speed label."""
-
-    def __init__(self, scene: QGraphicsScene) -> None:
-        super().__init__()
-        self.setPen(QPen(QColor("#77bfff"), 2))
-        self.setZValue(100)
-        scene.addItem(self)
-        self._origin_x = -900.0
-        self._origin_y = -900.0
-
-        self._head = QGraphicsPolygonItem()
-        self._head.setPen(QPen(QColor("#77bfff"), 2))
-        self._head.setBrush(QBrush(QColor("#77bfff")))
-        self._head.setZValue(100)
-        scene.addItem(self._head)
-
-        self._label = QGraphicsTextItem("")
-        font = QFont("Consolas", 9)
-        font.setBold(True)
-        self._label.setFont(font)
-        self._label.setDefaultTextColor(QColor("#77bfff"))
-        self._label.setZValue(100)
-        self._label.setTransform(QTransform().scale(1.0, -1.0))
-        scene.addItem(self._label)
-
-    def update_wind(self, wind_x: float, wind_y: float) -> None:
-        speed = math.hypot(float(wind_x), float(wind_y))
-        length = min(80.0, speed * 10.0)
-        length = max(10.0, length)
-        angle = math.atan2(float(wind_y), float(wind_x))
-        origin_x = self._origin_x
-        origin_y = self._origin_y
-        x2 = origin_x + length * math.cos(angle)
-        y2 = origin_y + length * math.sin(angle)
-        self.setLine(float(origin_x), float(origin_y), float(x2), float(y2))
-        self._update_head(origin_x, origin_y, x2, y2)
-        self._label.setPlainText(f"Wind: {speed:.1f} m/s")
-        self._label.setPos(float(origin_x) + 6.0, float(origin_y) + 6.0)
-
-    def set_anchor(self, x: float, y: float) -> None:
-        self._origin_x = float(x)
-        self._origin_y = float(y)
-
-    def _update_head(self, x1: float, y1: float, x2: float, y2: float) -> None:
-        angle = math.atan2(float(y2) - float(y1), float(x2) - float(x1))
-        size = 8.0
         left = angle + math.radians(150)
         right = angle - math.radians(150)
         p1 = QPointF(float(x2), float(y2))
@@ -733,13 +771,12 @@ class TacticalMapWidget(QGraphicsView):
         self.uav_marker.setZValue(7)
         self._uav_tail.setZValue(6.5)
 
-        self._cep_label = self._make_text_item("", 0, 0, QColor("#00ff41"), QFont("Consolas", 9))
-        self._cep_label.setZValue(100)
+        self._cep_label = self._make_text_item("", 0, 0, QColor("#00AA44"), QFont("Consolas", 9))
+        self._cep_label.setZValue(50)
 
         self.impact_layer = ImpactEllipseLayer(self.scene)
         self.corridor_layer = CorridorLayer(self.scene)
         self.guidance_arrow = GuidanceArrow(self.scene)
-        self.wind_vector = WindHUDItem(self.scene)
         self.scatter_layer = ImpactScatterLayer(self.scene)
         self.trail_layer = UAVTrailLayer(self.scene)
         self.wind_field = WindFieldLayer(self.scene)
@@ -749,7 +786,6 @@ class TacticalMapWidget(QGraphicsView):
 
         self.show_scatter = True
         self.show_corridor_centerline = True
-        self.show_wind_vector = True
 
         self._last_uav_scene_pos: Tuple[float, float] | None = None
         self._last_target_scene_pos: Tuple[float, float] | None = None
@@ -786,9 +822,19 @@ class TacticalMapWidget(QGraphicsView):
 
         self._validate_startup()
 
+        self._camera_feed_layer = CameraFeedLayer(self.viewport())
+        self._reposition_camera_feed()
+        self._camera_feed_layer.show()
+
         self._status_banner = StatusBannerWidget(self.viewport())
         self._reposition_status_banner()
         self._status_banner.show()
+
+        self._wind_indicator = WindIndicatorLayer(self.viewport())
+        self._reposition_wind_indicator()
+
+        # Ensure camera feed sits below other viewport children.
+        self._camera_feed_layer.lower()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -839,9 +885,18 @@ class TacticalMapWidget(QGraphicsView):
             self._grid_items.append(line)
 
     def resizeEvent(self, event) -> None:
+        self._reposition_camera_feed()
         self._reposition_status_banner()
+        self._reposition_wind_indicator()
         super().resizeEvent(event)
         self._update_grid()
+
+    def _reposition_camera_feed(self):
+        if hasattr(self, '_camera_feed_layer'):
+            viewport = self.viewport()
+            self._camera_feed_layer.setGeometry(
+                0, 0, viewport.width(), viewport.height()
+            )
 
     def _reposition_status_banner(self):
         if hasattr(self, '_status_banner'):
@@ -852,6 +907,15 @@ class TacticalMapWidget(QGraphicsView):
             x = (vw - banner_w) // 2
             y = 10
             self._status_banner.setGeometry(x, y, banner_w, banner_h)
+
+    def _reposition_wind_indicator(self):
+        if hasattr(self, '_wind_indicator'):
+            viewport = self.viewport()
+            w = self._wind_indicator.width()
+            h = self._wind_indicator.height()
+            x = 20
+            y = viewport.height() - h - 20
+            self._wind_indicator.move(x, y)
 
 
     # ---- Public update methods (no item creation) ----
@@ -890,7 +954,7 @@ class TacticalMapWidget(QGraphicsView):
         sa = float(a) * self._transform.pixels_per_meter
         sb = float(b) * self._transform.pixels_per_meter
         self.impact_layer.update(sx, sy, sa, sb, angle)
-        self._update_cep_label(a, b)
+        self._last_ellipse_center_scene = (float(sx), float(sy))
 
     def update_corridor(self, polygon_points: Iterable[Tuple[float, float]]) -> None:
         # Persistent items: update only geometry.
@@ -898,6 +962,19 @@ class TacticalMapWidget(QGraphicsView):
         self.corridor_layer.update_corridor(scene_pts)
         self.corridor_layer.set_centerline_visible(self.show_corridor_centerline)
         self._corridor_collapsed = self.corridor_layer.is_collapsed()
+
+    def update_camera_feed(self, image) -> None:
+        # Raw overlay, no georeferencing — silent fail on None.
+        if image is None:
+            return
+        vp = self.viewport()
+        scaled = image.scaled(
+            vp.width(),
+            vp.height(),
+            Qt.IgnoreAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self._camera_feed_layer.update_frame(scaled)
 
     def update_guidance_arrow(self) -> None:
         # Persistent items: update only geometry.
@@ -925,17 +1002,13 @@ class TacticalMapWidget(QGraphicsView):
         self.guidance_arrow.set_visible(True)
         self.guidance_arrow.update(u.x(), u.y(), px, py)
 
+    def update_wind_indicator(self, wind_x: float, wind_y: float) -> None:
+        if hasattr(self, "_wind_indicator"):
+            self._wind_indicator.update_wind(wind_x, wind_y)
+
     def update_wind(self, wind_x: float, wind_y: float) -> None:
-        if not self.show_wind_vector:
-            self.wind_vector.setVisible(False)
-            return
-        self.wind_vector.setVisible(True)
-        anchor_x = self.scene.sceneRect().left() + 20.0
-        anchor_y = self.scene.sceneRect().top() + 20.0
-        self.wind_vector.set_anchor(anchor_x, anchor_y)
         sx = float(wind_x) * self._transform.pixels_per_meter
         sy = float(wind_y) * self._transform.pixels_per_meter
-        self.wind_vector.update_wind(sx, sy)
         self.wind_field.update_field(sx, sy, self._transform.pixels_per_meter, self._last_target_scene_pos)
 
     def update_scatter(self, points: Iterable[Tuple[float, float]]) -> None:
@@ -1036,11 +1109,6 @@ class TacticalMapWidget(QGraphicsView):
             self.scatter_layer.set_visible(self.show_scatter)
             event.accept()
             return
-        if event.key() == Qt.Key_F2:
-            self.show_wind_vector = not self.show_wind_vector
-            self.wind_vector.setVisible(self.show_wind_vector)
-            event.accept()
-            return
         if event.key() == Qt.Key_F3:
             self.show_corridor_centerline = not self.show_corridor_centerline
             self.corridor_layer.set_centerline_visible(self.show_corridor_centerline)
@@ -1059,14 +1127,20 @@ class TacticalMapWidget(QGraphicsView):
             return
         super().keyPressEvent(event)
 
-    def _update_cep_label(self, a: float, b: float) -> None:
-        if not self._last_target_scene_pos:
+    def update_cep_label(self, cep_m: float) -> None:
+        center = getattr(self, "_last_ellipse_center_scene", None)
+        if center is None:
             self._cep_label.setPlainText("")
             return
-        cep = 0.5 * (float(a) + float(b))
-        self._cep_label.setPlainText(f"CEP: {cep:.1f} m")
-        tx, ty = self._last_target_scene_pos
-        self._cep_label.setPos(tx + 12.0, ty + 12.0)
+        if float(cep_m) > 999.9:
+            text = "CEP\u2085\u2080: ---"
+        else:
+            text = f"CEP\u2085\u2080: {float(cep_m):.1f} m"
+        self._cep_label.setPlainText(text)
+        sx, sy = center
+        # Label 10 px below 68% ellipse center. View applies scale(pxm, -pxm),
+        # so "below on screen" is negative Y in scene coords.
+        self._cep_label.setPos(float(sx), float(sy) - 10.0)
 
     def update_status(self, status: str) -> None:
         if getattr(self, "_corridor_collapsed", False):

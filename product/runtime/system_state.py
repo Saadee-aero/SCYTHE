@@ -34,6 +34,7 @@ class SystemState:
     envelope_dirty: bool = True
     running: bool = True
     monte_carlo_running: bool = False
+    mission_committed: bool = False
     impact_data_version: int = 0
     settings: Dict[str, Any] = field(default_factory=dict)
     lock: Lock = field(default_factory=Lock)

@@ -58,6 +58,8 @@ class ReleaseEnvelopeResult:
     heatmap: Optional[np.ndarray] = None
     heatmap_offsets: Optional[np.ndarray] = None
     heatmap_times: Optional[np.ndarray] = None
+    impact_mean: Optional[np.ndarray] = None
+    impact_cov: Optional[np.ndarray] = None
 
 
 def compute_release_envelope(
@@ -120,6 +122,7 @@ def compute_release_envelope(
     lateral = np.array([-forward[1], forward[0]], dtype=float)
 
     raw_results: List[Tuple[float, float, float, List[Tuple[float, float]], float, Optional[float]]] = []
+    window_results: List[ReleaseWindowResult] = []
     for offset in offsets:
         pos_offset = pos0.copy()
         pos_offset[:2] += lateral * float(offset)
@@ -134,6 +137,7 @@ def compute_release_envelope(
             offset=float(offset),
         )
 
+        window_results.append(window_result)
         raw_results.append((
             float(offset),
             window_result.optimal_release_time,
@@ -206,6 +210,18 @@ def compute_release_envelope(
         heatmap_offsets = offset_grid
         heatmap_times = time_grid
 
+    # Extract UT covariance from the best feasible entry for ellipse rendering.
+    best_impact_mean: Optional[np.ndarray] = None
+    best_impact_cov: Optional[np.ndarray] = None
+    if feasible_offsets:
+        best_feasible_p = -1.0
+        for i, entry in enumerate(envelope):
+            if entry.smoothed_p_hit >= threshold and entry.optimal_p_hit > best_feasible_p:
+                best_feasible_p = entry.optimal_p_hit
+                wr = window_results[i]
+                best_impact_mean = wr.optimal_impact_mean
+                best_impact_cov = wr.optimal_impact_cov
+
     return ReleaseEnvelopeResult(
         envelope=envelope,
         feasible_offsets=feasible_offsets,
@@ -213,5 +229,7 @@ def compute_release_envelope(
         heatmap=heatmap,
         heatmap_offsets=heatmap_offsets,
         heatmap_times=heatmap_times,
+        impact_mean=best_impact_mean,
+        impact_cov=best_impact_cov,
     )
 

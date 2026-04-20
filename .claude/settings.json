@@ -5,7 +5,26 @@
       "Bash(python -m py_compile qt_app/main.py)",
       "Bash(python -m py_compile qt_app.py)",
       "Bash(python -m py_compile product/runtime/run_scythe.py)",
-      "Bash(python -m py_compile product/ui/tabs/system_status.py)"
+      "Bash(python -m py_compile product/ui/tabs/system_status.py)",
+      "Bash(python -m py_compile product/ui/tactical_map_controller.py)",
+      "Bash(python -m py_compile product/explorer/release_time_explorer.py)",
+      "Bash(python -m py_compile product/explorer/release_envelope_solver.py)",
+      "Bash(python -m py_compile product/aircraft/motion_predictor.py)",
+      "Bash(python -m py_compile product/ui/widgets/tactical_map_widget.py product/ui/tactical_map_controller.py product/explorer/release_time_explorer.py product/explorer/release_envelope_solver.py product/aircraft/motion_predictor.py)",
+      "Bash(python -m py_compile product/ui/widgets/tactical_map_widget.py product/explorer/release_time_explorer.py)",
+      "Bash(python -m py_compile product/guidance/advisory_layer.py)",
+      "Bash(python -m py_compile product/terrain/terrain_model.py product/terrain/__init__.py)",
+      "Bash(python -m py_compile product/runtime/runtime_loops.py)",
+      "Bash(python -m py_compile product/sensors/__init__.py product/sensors/camera_feed.py)",
+      "Bash(python -m py_compile e:/AIRDROP-X/product/ui/widgets/tactical_map_widget.py)",
+      "Bash(python -m py_compile e:/AIRDROP-X/product/ui/tactical_map_controller.py)",
+      "Bash(python -m py_compile e:/AIRDROP-X/product/explorer/release_time_explorer.py)",
+      "Bash(python -m py_compile e:/AIRDROP-X/qt_app.py)",
+      "Bash(python -m py_compile e:/AIRDROP-X/product/guidance/deterministic_predictor.py)",
+      "Bash(python -m py_compile e:/AIRDROP-X/product/uncertainty/unscented_state_model.py)",
+      "Bash(python -m py_compile e:/AIRDROP-X/product/runtime/runtime_loops.py)",
+      "Bash(python -m py_compile e:/AIRDROP-X/product/sensors/camera_feed.py)",
+      "Bash(python -m py_compile product/runtime/system_state.py)"
     ]
   }
 }

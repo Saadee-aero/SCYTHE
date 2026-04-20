@@ -5,10 +5,14 @@ Uses the engine as a black box to evaluate drop feasibility.
 Single source of PropagationContext creation for deterministic and Monte Carlo paths.
 """
 
+import logging
+
 import numpy as np
 
 from product.physics.propagation_context import build_propagation_context
 from src.statistics import compute_wilson_ci
+
+logger = logging.getLogger(__name__)
 
 EXPLORER_STATUS_DEFAULT = "NOT_INVOKED"
 EXPLORER_STATUS_FEASIBLE = "FEASIBLE_SHIFT_FOUND"
@@ -173,6 +177,21 @@ def _run_monte_carlo_adaptive(
         impact_speeds = np.empty((0,), dtype=float)
 
     print(f"[MC ADAPTIVE] samples_used={int(impact_points.shape[0])}")
+
+    if adaptive_enabled and total_n > 0:
+        final_p_hit = float(total_hits) / float(total_n)
+        final_ci_low, final_ci_high = compute_wilson_ci(
+            max(1e-4, min(1.0 - 1e-4, final_p_hit)) * float(total_n), total_n,
+        )
+        final_ci_width = float(final_ci_high - final_ci_low)
+    else:
+        final_p_hit = float("nan")
+        final_ci_width = float("nan")
+    logger.info(
+        "[MC ADAPTIVE] final N=%d P_hit=%.4f CI_width=%.4f",
+        int(total_n), final_p_hit, final_ci_width,
+    )
+
     return impact_points, impact_speeds
 
 

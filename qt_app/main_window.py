@@ -711,11 +711,10 @@ class MainWindow(QMainWindow):
         })
         self._latest_snapshot = base
         self.app_state = AppState.PAYLOAD_SELECTED
+        with self.system_state.lock:
+            self.system_state.mission_committed = True
         self._update_summary_strip_after_commit()
         self.main_tabs.setCurrentIndex(0)
-        self.tactical_map_widget._status_banner.set_status(
-            DropStatus.NO_DROP, DropReason.UAV_TOO_FAR
-        )
         self._render_mission_tab()
         self._render_system_tab()
         self._update_app_state_ui()
