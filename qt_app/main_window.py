@@ -671,16 +671,11 @@ class MainWindow(QMainWindow):
 
     def _build_payload_tab(self, parent: QWidget | None) -> QWidget:
         """Mission Config tab: Mission Mode, accordion, Commit."""
-        scroll = QScrollArea(parent)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("background-color: #0d140d;")
-        self.mission_config_tab = MissionConfigTab(scroll)
-        scroll.setWidget(self.mission_config_tab)
+        self.mission_config_tab = MissionConfigTab(parent)
         self.mission_config_tab.config_committed.connect(self._on_mission_config_committed)
         self.mission_config_tab.dirty_changed.connect(self._on_mission_config_dirty_changed)
         self.mission_config_tab.threshold_changed.connect(self._on_mission_config_threshold_changed)
-        return scroll
+        return self.mission_config_tab
 
     def _is_mission_ready(self) -> bool:
         """AX-MISSION-READINESS-GATE-08: True iff payload configured."""
@@ -707,10 +702,23 @@ class MainWindow(QMainWindow):
     @Slot(dict)
     def _on_mission_config_committed(self, cfg: dict) -> None:
         """Push Mission Config tab values to config_state."""
-        if not self._is_payload_selected_in_config(cfg):
-            self._show_warning("Select and configure payload before committing mission.")
-            return
         committed_cfg = dict(cfg)
+
+        mass = float(cfg.get("mass", 0.0))
+        area = float(cfg.get("area", 0.0))
+        cd = float(cfg.get("cd", 0.0))
+        target_radius = float(cfg.get("target_radius", 0.0))
+        if mass <= 0.0 or area <= 0.0 or cd <= 0.0 or target_radius <= 0.0:
+            missing = [
+                name for name, val in [
+                    ("Mass", mass), ("Area", area), ("Cd", cd), ("Target Radius", target_radius)
+                ] if val <= 0.0
+            ]
+            self._show_warning(
+                f"Invalid physics values — {', '.join(missing)} must be > 0 before committing."
+            )
+            return
+
         # Ensure simulation_fidelity is always present on commit; default to advanced.
         committed_cfg.setdefault("simulation_fidelity", "advanced")
         self._mission_config_overrides = committed_cfg

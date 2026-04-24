@@ -562,6 +562,14 @@ class UAVTrailLayer:
             seg.setOpacity(max(0.1, min(0.6, opacity)))
             seg.setVisible(True)
 
+    def set_visible(self, visible: bool) -> None:
+        for seg in self._segments:
+            seg.setVisible(visible)
+        if not visible:
+            self._points = [None] * self._max
+            self._index = 0
+            self._count = 0
+
 
 class WindFieldLayer:
     """Grid of wind arrows across the map."""
@@ -780,6 +788,7 @@ class TacticalMapWidget(QGraphicsView):
         self._uav_tail.setFlag(QGraphicsItem.ItemIgnoresTransformations)
         self._uav_tail.setTransformOriginPoint(0.0, 0.0)
         self.scene.addItem(self._uav_tail)
+        self._uav_tail.setVisible(False)
         self.uav_marker.setZValue(7)
         self._uav_tail.setZValue(6.5)
 
@@ -947,10 +956,12 @@ class TacticalMapWidget(QGraphicsView):
         sx, sy = self._transform.world_to_scene(x, y)
         self.uav_marker.set_position(sx, sy)
         self.uav_marker.set_heading(heading)
-        self._uav_tail.setPos(sx, sy)
-        self._uav_tail.setRotation(float(heading))
         self._last_uav_scene_pos = (sx, sy)
-        self.trail_layer.update(sx, sy)
+        if self._mission_committed:
+            self._uav_tail.setPos(sx, sy)
+            self._uav_tail.setRotation(float(heading))
+            self._uav_tail.setVisible(True)
+            self.trail_layer.update(sx, sy)
         if self.follow_uav:
             self.centerOn(sx, sy)
         if self.focus_mode:
@@ -962,7 +973,7 @@ class TacticalMapWidget(QGraphicsView):
             return
         # Persistent items: update only geometry.
         sx, sy = self._transform.world_to_scene(float(x), float(y))
-        self.target_marker.set_visible(True)
+        self.target_marker.setVisible(True)
         self.target_marker.set_position(sx, sy)
         self._last_target_scene_pos = (sx, sy)
         if self.focus_mode:
@@ -1042,6 +1053,8 @@ class TacticalMapWidget(QGraphicsView):
         self._mission_committed = committed
         if not committed:
             self._clear_guidance_arrow()
+            self._uav_tail.setVisible(False)
+            self.trail_layer.set_visible(False)
 
     def update_guidance_arrow(self) -> None:
         if not self._mission_committed:

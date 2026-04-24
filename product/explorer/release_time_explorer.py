@@ -246,6 +246,7 @@ def find_release_window(
         else {"n_samples": int(getattr(config, "n_samples", 500))}
     )
 
+    mc_start_time = time.perf_counter()
     if enable_hybrid and target_radius > 0:
         candidate_threshold = 0.25 * threshold
         max_mc_verifications = int(getattr(config, "max_mc_verifications", 10))
@@ -269,9 +270,9 @@ def find_release_window(
             if i not in mc_indices:
                 continue
 
-            elapsed = time.perf_counter() - start_time
-            if elapsed > 0.1:
-                print("[HYBRID] MC verification skipped due to runtime limit")
+            mc_elapsed = time.perf_counter() - mc_start_time
+            if mc_elapsed > 0.05:
+                print(f"[HYBRID] MC verification skipped due to runtime limit (mc_elapsed={mc_elapsed*1000:.1f}ms)")
                 break
 
             pos_future = pos0 + vel0 * float(entry.time)

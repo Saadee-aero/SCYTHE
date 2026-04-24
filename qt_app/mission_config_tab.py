@@ -5,7 +5,7 @@ Reads from config snapshot for display; commits push to config_state.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal, Slot, QTimer
+from PySide6.QtCore import QEvent, QObject, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -92,7 +91,7 @@ class ConfigPanel(QFrame):
         self.setStyleSheet(
             "QFrame#configPanel { border: 1px solid #1f3a1f; border-radius: 4px; background-color: #0a110a; }"
         )
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumWidth(180)
 
         root = QVBoxLayout(self)
@@ -145,9 +144,15 @@ class MissionConfigTab(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(8)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # ---- Strips container: mode + threshold, with side/top margins ----
+        strips_container = QWidget(self)
+        strips_layout = QVBoxLayout(strips_container)
+        strips_layout.setContentsMargins(10, 10, 10, 0)
+        strips_layout.setSpacing(8)
 
         # ---- Mission Mode strip ----
         self._mode_strip = QFrame(self)
@@ -228,7 +233,7 @@ class MissionConfigTab(QWidget):
         mode_layout.addWidget(mode_caption)
         strip_layout.addWidget(mode_block, 1)
 
-        main_layout.addWidget(self._mode_strip)
+        strips_layout.addWidget(self._mode_strip)
 
         # ---- Threshold strip ----
         self._threshold_strip = QFrame(self)
@@ -263,20 +268,14 @@ class MissionConfigTab(QWidget):
         th_layout.addWidget(self._threshold_spinbox)
         self._threshold_slider.valueChanged.connect(self._on_threshold_slider_changed)
         self._threshold_spinbox.valueChanged.connect(self._on_threshold_spinbox_changed)
-        main_layout.addWidget(self._threshold_strip)
+        strips_layout.addWidget(self._threshold_strip)
+        outer_layout.addWidget(strips_container)
 
-        # ---- Panels (horizontal) ----
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
-        panels_widget = QWidget()
+        # ---- Panels (horizontal, no scroll — fills remaining space) ----
+        panels_widget = QWidget(self)
         panels_layout = QHBoxLayout(panels_widget)
-        panels_layout.setContentsMargins(0, 0, 0, 0)
-        panels_layout.setSpacing(10)
+        panels_layout.setContentsMargins(10, 0, 10, 0)
+        panels_layout.setSpacing(8)
 
         payload_panel = self._build_payload_panel()
         target_panel = self._build_target_panel()
@@ -286,27 +285,14 @@ class MissionConfigTab(QWidget):
         panels_layout.addWidget(target_panel, 1)
         panels_layout.addWidget(policy_panel, 1)
 
-        def _equalize_heights() -> None:
-            panels_widget.adjustSize()
-            h = max(
-                payload_panel.sizeHint().height(),
-                target_panel.sizeHint().height(),
-                policy_panel.sizeHint().height(),
-            )
-            if h > 0:
-                payload_panel.setMinimumHeight(h)
-                target_panel.setMinimumHeight(h)
-                policy_panel.setMinimumHeight(h)
+        outer_layout.addWidget(panels_widget, 1)
 
-        QTimer.singleShot(50, _equalize_heights)
-
-        scroll.setWidget(panels_widget)
-        main_layout.addWidget(scroll, 1)
-
-        main_layout.addSpacing(12)
-
-        # ---- Commit Section ----
-        commit_frame = QFrame(self)
+        # ---- Commit Section — fixed outside scroll, always visible ----
+        _commit_wrapper = QWidget(self)
+        _commit_wrapper_layout = QVBoxLayout(_commit_wrapper)
+        _commit_wrapper_layout.setContentsMargins(10, 6, 10, 10)
+        _commit_wrapper_layout.setSpacing(0)
+        commit_frame = QFrame(_commit_wrapper)
         commit_frame.setObjectName("commitFrame")
         commit_frame.setStyleSheet(
             "QFrame#commitFrame { border: 1px solid #1f3a1f; border-radius: 4px; background-color: #0a110a; }"
@@ -316,6 +302,7 @@ class MissionConfigTab(QWidget):
         commit_frame_layout.setSpacing(4)
         self._commit_btn = QPushButton("Commit Configuration", self)
         self._commit_btn.setMinimumHeight(32)
+        self._commit_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._commit_btn.setStyleSheet(
             f"QPushButton {{ background-color: #1a2a1a; color: {PRIMARY_COLOR}; border: 1px solid #2a3a2a; border-radius: 4px; font-size: 15px; }}"
             "QPushButton:hover { background-color: #2a3a2a; }"
@@ -323,7 +310,8 @@ class MissionConfigTab(QWidget):
         )
         self._commit_btn.clicked.connect(self._on_commit_clicked)
         commit_frame_layout.addWidget(self._commit_btn)
-        main_layout.addWidget(commit_frame)
+        _commit_wrapper_layout.addWidget(commit_frame)
+        outer_layout.addWidget(_commit_wrapper)
 
         self._update_panel_summaries()
         self._update_mode_strip_border()
