@@ -449,10 +449,7 @@ class DriftArrow:
     def update(self, x1: float, y1: float, x2: float, y2: float) -> None:
         self._line.setLine(float(x1), float(y1), float(x2), float(y2))
         self._update_head(x1, y1, x2, y2)
-        mx = (float(x1) + float(x2)) * 0.5
-        my = (float(y1) + float(y2)) * 0.5
-        self._label.setPlainText("DRIFT VECTOR")
-        self._label.setPos(mx + 6.0, my + 6.0)
+        self._label.setPlainText("")
 
     def set_visible(self, visible: bool) -> None:
         self._line.setVisible(visible)
@@ -902,17 +899,23 @@ class TacticalMapWidget(QGraphicsView):
             self._initial_center_done = True
 
     def fit_view_to_uav_and_target(self) -> None:
-        """Auto-zoom map to show both UAV and target with 20% padding."""
-        if self._last_uav_scene_pos is None or self._last_target_scene_pos is None:
+        """Auto-zoom to include UAV, target, and impact_mean with 25% padding."""
+        candidates = []
+        if self._last_uav_scene_pos is not None:
+            candidates.append(self._last_uav_scene_pos)
+        if self._last_target_scene_pos is not None:
+            candidates.append(self._last_target_scene_pos)
+        impact_scene = getattr(self, "_last_impact_mean_scene", None)
+        if impact_scene is not None:
+            candidates.append(impact_scene)
+        if not candidates:
             return
-        ux, uy = self._last_uav_scene_pos
-        tx, ty = self._last_target_scene_pos
-        min_x = min(ux, tx)
-        max_x = max(ux, tx)
-        min_y = min(uy, ty)
-        max_y = max(uy, ty)
-        pad_x = max((max_x - min_x) * 0.2, 50.0)
-        pad_y = max((max_y - min_y) * 0.2, 50.0)
+        xs = [p[0] for p in candidates]
+        ys = [p[1] for p in candidates]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        pad_x = max((max_x - min_x) * 0.25, 50.0)
+        pad_y = max((max_y - min_y) * 0.25, 50.0)
         scene_rect = QRectF(
             min_x - pad_x, min_y - pad_y,
             (max_x - min_x) + 2 * pad_x,
@@ -933,6 +936,7 @@ class TacticalMapWidget(QGraphicsView):
         sb = float(b) * self._transform.pixels_per_meter
         self.impact_layer.update(sx, sy, sa, sb, angle)
         self._last_ellipse_center_scene = (float(sx), float(sy))
+        self._last_impact_mean_scene = (float(sx), float(sy))
 
     def update_corridor(self, polygon_points: Iterable[Tuple[float, float]]) -> None:
         # Persistent items: update only geometry.
@@ -1124,10 +1128,10 @@ class TacticalMapWidget(QGraphicsView):
         super().keyPressEvent(event)
 
     def update_cep_label(self, cep_m: float) -> None:
-        # Anchor to drift endpoint when available; fall back to ellipse center.
+        # Anchor priority: drift endpoint \u2192 impact_mean scene pos \u2192 hide.
         anchor = getattr(self, "_last_drift_endpoint_scene", None)
         if anchor is None:
-            anchor = getattr(self, "_last_ellipse_center_scene", None)
+            anchor = getattr(self, "_last_impact_mean_scene", None)
         if anchor is None:
             self._cep_label.setPlainText("")
             return
@@ -1138,9 +1142,9 @@ class TacticalMapWidget(QGraphicsView):
         self._cep_label.setPlainText(text)
         self._last_cep50_m = float(cep_m)
         sx, sy = anchor
-        # 20px below drift endpoint on screen. Y is flipped (scene up = screen down),
-        # so screen-down = scene -20.
-        self._cep_label.setPos(float(sx), float(sy) - 20.0)
+        # 30px below anchor on screen. Y is flipped (scene up = screen down),
+        # so screen-down = scene -30.
+        self._cep_label.setPos(float(sx), float(sy) - 30.0)
 
     def update_status(self, status: str) -> None:
         if getattr(self, "_corridor_collapsed", False):
