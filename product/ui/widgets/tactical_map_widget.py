@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from typing import Iterable, List, Tuple
 
 from PySide6.QtCore import QPointF, Qt, QRectF, Signal
@@ -126,6 +127,75 @@ class WindIndicatorLayer(QWidget):
             label = f"{self._speed:.1f} m/s"
             p.drawText(QRectF(0.0, self.height() - 18.0, float(self.width()), 16.0),
                        int(Qt.AlignHCenter | Qt.AlignVCenter), label)
+        finally:
+            p.end()
+
+
+class MapLegendWidget(QWidget):
+    """Collapsible map legend overlay — viewport-fixed, bottom-right corner.
+
+    Collapsed: 28×28 px "?" button.
+    Expanded: 180×160 px dark panel with symbol/color/label legend rows.
+    """
+
+    _COLLAPSED_W = 28
+    _COLLAPSED_H = 28
+    _EXPANDED_W = 180
+    _EXPANDED_H = 160
+
+    # (symbol, symbol_color_hex, label)
+    _ENTRIES = [
+        ("--", "#00ff00", "Release corridor"),
+        ("+",  "#ffff33", "Target"),
+        ("→", "#ffffff", "Wind direction"),
+        ("↑", "#00ff41", "UAV"),
+        ("●", "#ff9933", "Predicted impact"),
+        ("↗", "#ff9933", "Drift vector"),
+    ]
+
+    def __init__(self, parent: QWidget, on_resize=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._expanded = False
+        self._on_resize = on_resize
+        self.setFixedSize(self._COLLAPSED_W, self._COLLAPSED_H)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        self._expanded = not self._expanded
+        if self._expanded:
+            self.setFixedSize(self._EXPANDED_W, self._EXPANDED_H)
+        else:
+            self.setFixedSize(self._COLLAPSED_W, self._COLLAPSED_H)
+        if self._on_resize:
+            self._on_resize()
+        self.update()
+        event.accept()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            bg = QColor(0x1a, 0x1a, 0x1a, 0xCC)
+            p.setBrush(QBrush(bg))
+            p.setPen(QPen(QColor("#333333"), 1))
+            p.drawRoundedRect(self.rect(), 4, 4)
+            font = QFont("Consolas", 9)
+            p.setFont(font)
+            if not self._expanded:
+                p.setPen(QColor("#aaaaaa"))
+                p.drawText(self.rect(), Qt.AlignCenter, "?")
+                return
+            y = 8
+            row_h = 24
+            for symbol, sym_color, label in self._ENTRIES:
+                p.setPen(QColor(sym_color))
+                p.drawText(QRectF(8.0, float(y), 28.0, float(row_h)),
+                           Qt.AlignLeft | Qt.AlignVCenter, symbol)
+                p.setPen(QColor("#aaaaaa"))
+                p.drawText(QRectF(40.0, float(y), 132.0, float(row_h)),
+                           Qt.AlignLeft | Qt.AlignVCenter, label)
+                y += row_h
         finally:
             p.end()
 
@@ -630,6 +700,7 @@ class TacticalMapWidget(QGraphicsView):
         self._last_uav_scene_pos: Tuple[float, float] | None = None
         self._last_target_scene_pos: Tuple[float, float] | None = None
         self._corridor_collapsed = False
+        self._scroll_zoom_until: float = 0.0
 
         self._banner_item = self._make_text_item("", 0, 0, QColor("#ffaa00"), QFont("Consolas", 14))
         banner_font = QFont("Consolas", 14)
@@ -681,6 +752,9 @@ class TacticalMapWidget(QGraphicsView):
 
         self._wind_indicator = WindIndicatorLayer(self.viewport())
         self._reposition_wind_indicator()
+
+        self._legend = MapLegendWidget(self.viewport(), on_resize=self._reposition_legend)
+        self._reposition_legend()
 
         # Ensure camera feed sits below other viewport children.
         self._camera_feed_layer.lower()
@@ -737,6 +811,7 @@ class TacticalMapWidget(QGraphicsView):
         self._reposition_camera_feed()
         self._reposition_no_feed_label()
         self._reposition_wind_indicator()
+        self._reposition_legend()
         super().resizeEvent(event)
         self._update_grid()
 
@@ -764,6 +839,15 @@ class TacticalMapWidget(QGraphicsView):
             x = 20
             y = viewport.height() - h - 20
             self._wind_indicator.move(x, y)
+
+    def _reposition_legend(self):
+        if hasattr(self, '_legend'):
+            viewport = self.viewport()
+            w = self._legend.width()
+            h = self._legend.height()
+            x = viewport.width() - w - 16
+            y = viewport.height() - h - 16
+            self._legend.move(x, y)
 
 
     # ---- Public update methods (no item creation) ----
@@ -798,7 +882,12 @@ class TacticalMapWidget(QGraphicsView):
             self._initial_center_done = True
 
     def fit_view_to_uav_and_target(self) -> None:
-        """Auto-zoom to UAV, target, and corridor bounds with 25% padding."""
+        """Auto-zoom to UAV, target, and corridor bounds with 30% padding.
+
+        Suppressed for 10 s after any operator Ctrl+scroll zoom action.
+        """
+        if time.monotonic() < self._scroll_zoom_until:
+            return
         candidates = []
         if self._last_uav_scene_pos is not None:
             candidates.append(self._last_uav_scene_pos)
@@ -815,8 +904,8 @@ class TacticalMapWidget(QGraphicsView):
         ys = [p[1] for p in candidates]
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
-        pad_x = max((max_x - min_x) * 0.25, 50.0)
-        pad_y = max((max_y - min_y) * 0.25, 50.0)
+        pad_x = max((max_x - min_x) * 0.30, 50.0)
+        pad_y = max((max_y - min_y) * 0.30, 50.0)
         scene_rect = QRectF(
             min_x - pad_x, min_y - pad_y,
             (max_x - min_x) + 2 * pad_x,
@@ -945,6 +1034,8 @@ class TacticalMapWidget(QGraphicsView):
             self.translate(delta_scene.x(), delta_scene.y())
             self._update_scale_bar()
             self._update_grid()
+            # Suppress auto-zoom for 10 s after operator manually zooms.
+            self._scroll_zoom_until = time.monotonic() + 10.0
             event.accept()
             return
 
@@ -1149,9 +1240,40 @@ class TacticalMapWidget(QGraphicsView):
         rect = self.scene.sceneRect()
         self._phit_label.setPos(rect.left() + 20.0, rect.top() + 100.0)
 
+    def _clip_endpoint(self, x1: float, y1: float, x2: float, y2: float,
+                       fraction: float = 0.8) -> Tuple[float, float]:
+        """Clip (x2,y2) to `fraction` of the visible scene rect, preserving direction."""
+        vr = self.mapToScene(self.viewport().rect()).boundingRect()
+        cx, cy = vr.center().x(), vr.center().y()
+        hw = vr.width() * fraction * 0.5
+        hh = vr.height() * fraction * 0.5
+        rx_min, rx_max = cx - hw, cx + hw
+        ry_min, ry_max = cy - hh, cy + hh
+        # Already inside — no clipping needed.
+        if rx_min <= x2 <= rx_max and ry_min <= y2 <= ry_max:
+            return x2, y2
+        dx, dy = x2 - x1, y2 - y1
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return x2, y2
+        # Parametric intersection: find smallest t in (0,1] where ray exits rect.
+        t_clip = 1.0
+        if abs(dx) > 1e-9:
+            for bx in (rx_min, rx_max):
+                t = (bx - x1) / dx
+                if 0.0 < t < t_clip and ry_min <= y1 + t * dy <= ry_max:
+                    t_clip = t
+        if abs(dy) > 1e-9:
+            for by in (ry_min, ry_max):
+                t = (by - y1) / dy
+                if 0.0 < t < t_clip and rx_min <= x1 + t * dx <= rx_max:
+                    t_clip = t
+        return x1 + t_clip * dx, y1 + t_clip * dy
+
     def update_drift(self, release_x: float, release_y: float, impact_x: float, impact_y: float) -> None:
         sx1, sy1 = self._transform.world_to_scene(release_x, release_y)
         sx2, sy2 = self._transform.world_to_scene(impact_x, impact_y)
+        # Clip endpoint to 80% of visible scene rect so arrow never exits viewport.
+        sx2, sy2 = self._clip_endpoint(sx1, sy1, sx2, sy2, 0.8)
         self.drift_arrow.update(sx1, sy1, sx2, sy2)
         self.drift_arrow.set_visible(True)
         self._last_drift_endpoint_scene = (float(sx2), float(sy2))
